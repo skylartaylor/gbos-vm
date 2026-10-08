@@ -6,6 +6,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import battery_sync
 import vm_control
 
 
@@ -68,16 +69,23 @@ def main():
                                       env=venv, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             children.append(viewer)
             serial = run_dir / 'serial.log'; configured = False; start = time.monotonic()
+            battery_stop = None
             while vm.poll() is None and viewer.poll() is None:
                 time.sleep(.5)
-                # Once Android is up, match the display density to the resolution (persists).
+                # Once Android is up, match the display density to the resolution (persists) and sync battery.
                 if not configured and time.monotonic() - start > 20 and serial.exists() and b'VM_BOOT_COMPLETED' in serial.read_bytes():
                     configured = True
-                    try: time.sleep(8); vm_control.send(run_dir, f'VM_DENSITY {density}')
-                    except OSError: pass
+                    try:
+                        time.sleep(8)
+                        vm_control.send(run_dir, f'VM_DENSITY {density}')
+                        battery_stop, _ = battery_sync.start_background_sync(run_dir, interval=30)
+                    except OSError:
+                        pass
     except KeyboardInterrupt:
         print('\nStopping.', flush=True)
     finally:
+        if battery_stop is not None:
+            battery_stop.set()
         for child in reversed(children):
             if child.poll() is None: os.killpg(child.pid, signal.SIGTERM)
         for child in reversed(children):

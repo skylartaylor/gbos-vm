@@ -148,6 +148,7 @@ static unsigned short scan[128] = {
 @property(nonatomic) BOOL startFullscreen;
 @property(nonatomic,strong) NSWindow *settingsWindow;
 @property(nonatomic,strong) NSTask *vmTask;
+@property(nonatomic,strong) NSTask *batteryTask;
 @property(nonatomic,strong) NSString *runDir;
 @property(nonatomic) BOOL quitting;
 @property(nonatomic) BOOL restarting;
@@ -271,11 +272,20 @@ static unsigned short scan[128] = {
     NSTask *c=[NSTask new];c.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];
     c.arguments=@[[NSBundle.mainBundle pathForResource:@"vm_control" ofType:@"py"],self.runDir,[NSString stringWithFormat:@"VM_DENSITY %ld",(long)self.guestDensity]];
     [c launchAndReturnError:nil];});
+   dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(9*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+    NSString *bs=[NSBundle.mainBundle pathForResource:@"battery_sync" ofType:@"py"];
+    if(bs){
+     self.batteryTask=[NSTask new];self.batteryTask.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];
+     self.batteryTask.arguments=@[bs,self.runDir];
+     [self.batteryTask launchAndReturnError:nil];
+    }
+   });
   }
  }];
 }
 - (void)restartVM:(id)sender {if(self.vmTask){self.restarting=YES;[NSApp terminate:nil];}}
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+ if(self.batteryTask&&self.batteryTask.running)[self.batteryTask terminate];
  if(!self.vmTask||!self.vmTask.running)return NSTerminateNow;
  self.quitting=YES;self.window.subtitle=self.restarting?@"Restarting: shutting Android down…":@"Shutting Android down…";[self.view releaseCapture];[self.vmTask terminate];
  return NSTerminateLater;

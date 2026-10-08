@@ -42,6 +42,28 @@ handle() {
     VM_STATUS)
       echo "VM_CONTROL boot=$(getprop sys.boot_completed) user=$(timeout 5 am get-current-user) size=$(timeout 5 wm size | tr '\n' ' ') density=$(timeout 5 wm density | tr '\n' ' ')"
       timeout 5 cat /proc/asound/cards 2>&1 | sed 's/^/VM_CONTROL asound /' ;;
+    VM_BATTERY\ *)
+      args="${line#VM_BATTERY }"
+      level="${args%% *}"
+      state="${args#* }"
+      [ "$state" = "$args" ] && state="discharging"
+      if [ -n "$level" ]; then
+        if [ "$state" = "charging" ] || [ "$state" = "ac" ]; then
+          cmd battery set ac 1
+          cmd battery set status 2
+        elif [ "$state" = "full" ]; then
+          cmd battery set ac 1
+          cmd battery set status 5
+        else
+          cmd battery unplug
+          cmd battery set status 3
+        fi
+        cmd battery set level "$level"
+        echo "VM_CONTROL battery level=$level state=$state"
+      fi ;;
+    VM_BATTERY_RESET)
+      cmd battery reset
+      echo "VM_CONTROL battery_reset" ;;
   esac
 }
 # Commands must not read the console, or they would swallow later verbs.

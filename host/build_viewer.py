@@ -16,7 +16,7 @@ for p in (app / 'MacOS', app / 'Resources', build / 'modules', build / 'module-c
 shader = (S / 'CocoaSpiceRenderer/CSShaders.metal').read_text().replace(
     '#import "include/CSShaderTypes.h"', (S / 'CocoaSpiceRenderer/include/CSShaderTypes.h').read_text())
 (app / 'Resources/VMShaders.metal').write_text(shader)
-for name in ('run_vm.py', 'vm_control.py'):
+for name in ('run_vm.py', 'vm_control.py', 'battery_sync.py'):
     shutil.copyfile(run_scripts / name, app / 'Resources' / name)
 (app / 'Info.plist').write_bytes(plistlib.dumps({
     'CFBundleIdentifier': 'local.googlebook.viewer', 'CFBundleName': 'Googlebook VM', 'GBOSWork': str(work),
