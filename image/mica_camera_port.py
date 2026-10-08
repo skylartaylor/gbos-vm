@@ -9,11 +9,13 @@ and with those removed it opens sessions that never start streaming. It is retir
 
 Instead this adds the official Cuttlefish build of AOSP's external camera provider
 (ICameraProvider/external/0, an APEX with its own init script and VINTF fragment), which reads
-any /dev/videoN on the CPU. Two vendor files make it work:
+any /dev/videoN on the CPU. Three vendor files make it work:
 - vendor_service_contexts: Googlebook's policy labels the usb/legacy/qti provider instances but
   not external/0; label it hal_camera_service like the others.
 - external_camera_config.xml: without it the provider caps 720p at 7.5 fps and 1080p at 5 fps,
-  which drops every mode of a 30 fps webcam except 640x480. Nothing is ignored as internal."""
+  which drops every mode of a 30 fps webcam except 640x480. Nothing is ignored as internal.
+- permissions/features.xml: an external camera instead of the front one Googlebook declares, so
+  CameraX apps don't wait for a front camera that never shows up."""
 from pathlib import Path
 from erofs_metadata import metadata
 
@@ -61,5 +63,16 @@ def apply(add, original, raw, off):
     assert b'ICameraProvider/external/0' not in contexts
     add(n, contexts.rstrip(b'\n') + b'\nandroid.hardware.camera.provider.ICameraProvider/external/0 u:object_r:hal_camera_service:s0\n',
         m['xattrs']['security.selinux'].decode().split(':')[2], m['mode'] & 0o7777)
+    # Googlebook declares a front camera, but the provider reports every V4L2 camera as external.
+    # CameraX checks the declared cameras when an app starts it, and a missing front camera makes
+    # it retry for about six seconds before it opens anything. Declare what the VM has instead.
+    n = 'etc/permissions/features.xml'
+    m = metadata(raw, '/' + n, off)
+    features = original(n)
+    front = b'<feature name="android.hardware.camera.front"/>'
+    assert features.count(front) == 1, n
+    add(n, features.replace(front, b'<feature name="android.hardware.camera.external"/>'),
+        m['xattrs']['security.selinux'].decode().split(':')[2], m['mode'] & 0o7777)
     return {'provider': 'AOSP external camera provider (Cuttlefish 16373615 ' + APEX + ')',
-            'service': 'ICameraProvider/external/0 -> hal_camera_service', 'googlebook_usb_hal': 'retired'}
+            'service': 'ICameraProvider/external/0 -> hal_camera_service', 'googlebook_usb_hal': 'retired',
+            'feature': 'android.hardware.camera.front -> android.hardware.camera.external'}

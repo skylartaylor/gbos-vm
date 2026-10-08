@@ -85,7 +85,7 @@ The image starts as Google's unmodified recovery download. We don't touch the sy
 - **Software KeyMint and Gatekeeper** instead of hardware-backed ones. Your keys aren't protected by a secure element, because there isn't one.
 - **No verified boot on the vendor partition.** The other partitions keep their original verity; the one we modify can't.
 - **Three extra SELinux rules**, all narrowly about graphics buffer sharing. SELinux stays enforcing.
-- **AOSP's V4L2 camera provider** (Cuttlefish's build) instead of Googlebook's USB camera HAL, plus one service label for it in `vendor_service_contexts`. The SELinux policy itself is unchanged.
+- **AOSP's V4L2 camera provider** (Cuttlefish's build) instead of Googlebook's USB camera HAL, plus one service label for it in `vendor_service_contexts`. The SELinux policy itself is unchanged. The device also declares an external camera instead of a front one, because that's what the provider reports.
 - **Cuttlefish's audio configuration, edited for a USB microphone:** an input-only USB audio module is added, and the built-in microphone the VM doesn't have is removed.
 - **A helper running as the Android shell user** that takes pointer and clipboard input from the viewer. It only accepts a host that presents a random per-boot token, and it listens to nothing — it connects out to `127.0.0.1` on your Mac.
 
@@ -95,7 +95,6 @@ So: treat it like a dev VM. It's great for poking at the OS. I wouldn’t daily 
 
 - **Bluetooth.** It crashes on boot and Android will tell you about it. Dismiss the dialog.
 - **Camera and video frames in OpenGL ES apps.** Android itself draws camera previews and video with Vulkan here, and that works. An app that samples those frames with OpenGL ES instead (through a `SurfaceTexture`) gets a black or broken image: the guest's OpenGL ES driver can't read YUV buffers yet.
-- **Switching the Camera app to video pauses for about five seconds.** The camera service waits for the old stream to finish, gives up, and reopens the camera.
 - **Video whose width isn't a multiple of 32 pixels** (720-wide SD video, say) should get a thin strip of padding along its right edge. The usual HD sizes are fine.
 - **A TPM daemon crash-loops in the background.** It's harmless but it wastes a bit of CPU. We haven't found a clean way to stop it yet.
 - **60 fps cap** on the guest display. The QEMU build we use doesn't expose a refresh rate setting.
