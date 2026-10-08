@@ -7,7 +7,7 @@ import base64, socket, sys, time
 from pathlib import Path
 
 VERBS = ('VM_POWEROFF', 'VM_STATUS', 'VM_POINTER', 'VM_POINTER_ACCEL_OFF', 'VM_AUDIO_DIAG',
-         'VM_PLAY_TEST', 'VM_POINTER_LOCATION 0', 'VM_POINTER_LOCATION 1', 'VM_PASTE', 'VM_PASTE1')
+         'VM_PLAY_TEST', 'VM_CAMERA_DIAG', 'VM_POINTER_LOCATION 0', 'VM_POINTER_LOCATION 1', 'VM_PASTE', 'VM_PASTE1')
 
 
 def send(run_dir, verb, text=None):

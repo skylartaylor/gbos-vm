@@ -204,6 +204,9 @@ if '--audio' in sys.argv:
  from mica_audio_port import apply
  apply(add)
  (O/'audio-port.json').write_text(json.dumps({'source':'official Cuttlefish build 16373615 audio APEX','deselected':'com.android.hardware.audio.desktop','host_audio':'none'})+'\n')
+if '--camera' in sys.argv:
+ from mica_camera_port import apply
+ (O/'camera-port.json').write_text(json.dumps(apply(add,original,raw,off))+'\n')
 if '--vm-compat' in sys.argv:
  # Keep A/B boot-control behaviour without the ChromeOS firmware calls.
  add('bin/hw/android.hardware.boot-service.android-desktop',(R/'artifacts/security-port-review/boot-service.default').read_bytes(),'hal_bootctl_default_exec',0o755)
@@ -266,6 +269,7 @@ done
 with tarfile.open(O/'overlay.tar','w',format=tarfile.PAX_FORMAT) as t:
  dirs=['.','bin','bin/hw','etc','etc/init','etc/init/hw','etc/selinux','etc/vintf','etc/vintf/manifest','lib64','lib64/hw','lib64/egl','lib64/vm_keymint']
  if '--audio' in sys.argv:dirs.append('apex')
+ if '--camera' in sys.argv and 'apex' not in dirs:dirs.append('apex')
  for n in dirs:
   m=metadata(raw,'/'+n if n!='.' else '/',off) if n!='lib64/vm_keymint' else {'mode':0o40755,'uid':0,'gid':2000,'mtime':1230768000,'xattrs':{'security.selinux':b'u:object_r:vendor_file:s0'}}
   ti=tarfile.TarInfo(n);ti.type=tarfile.DIRTYPE;ti.mode=m['mode']&0o7777;ti.uid=m['uid'];ti.gid=m['gid'];ti.mtime=m['mtime']

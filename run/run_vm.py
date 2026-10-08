@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Run the Googlebook VM once with an explicit QEMU command line.
 
-  run_vm.py WORK RUN_NAME [--seconds N] [--snapshot] [--offline] [--no-audio]
+  run_vm.py WORK RUN_NAME [--seconds N] [--snapshot] [--offline] [--no-audio] [--webcam]
             [--display WxH] [--memory MIB] [--cpus N]
 
 WORK is the build folder (host/, image/, UTM-beta/). Logs and sockets go to WORK/logs/RUN_NAME.
 The disk is written to unless --snapshot is given. Networking is QEMU user-mode NAT with no
 inbound forwards; --offline removes it (the pointer/clipboard helper then cannot connect).
 On stop, Android is asked to power off through the guest control channel before QEMU is killed.
+--webcam adds a usb-redir port on WORK/logs/RUN_NAME/webcam.sock; the viewer app connects to it
+and plugs in a USB camera backed by the Mac's camera (host/webcam.m). Nothing is plugged in until
+something connects, so the option is harmless on its own.
 """
 import argparse, fcntl, json, os, secrets, signal, subprocess, sys
 from pathlib import Path
@@ -33,7 +36,7 @@ def main():
     a.add_argument('work'); a.add_argument('name')
     a.add_argument('--seconds', type=int, default=3600)
     a.add_argument('--snapshot', action='store_true'); a.add_argument('--offline', action='store_true')
-    a.add_argument('--no-audio', action='store_true')
+    a.add_argument('--no-audio', action='store_true'); a.add_argument('--webcam', action='store_true')
     a.add_argument('--display', default='1920x1200'); a.add_argument('--memory', type=int, default=4096)
     a.add_argument('--cpus', type=int, default=6)
     a.add_argument('--image', help='image folder (default WORK/image)')
@@ -64,7 +67,9 @@ def main():
            '-kernel', str(image / 'kernel.Image'), '-initrd', str(image / 'initrd.img'), '-append', CMDLINE + ' androidboot.gbos_token=' + token,
            '-drive', f'if=none,media=disk,id=driveimage,format=raw,file={image / "googlebook.raw"}',
            '-device', 'virtio-blk-pci,drive=driveimage', '-device', 'virtio-serial', '-no-reboot',
-           '-device', 'qemu-xhci,id=xhci,addr=0x5', '-device', 'usb-kbd,id=keyboard,bus=xhci.0',
+           # Eight USB 2 ports: with the default four, keyboard, mouse, network and audio fill them
+           # and anything else lands on a full-speed hub, too slow for the webcam.
+           '-device', 'qemu-xhci,id=xhci,addr=0x5,p2=8,p3=8', '-device', 'usb-kbd,id=keyboard,bus=xhci.0',
            '-device', 'usb-mouse,id=mouse,bus=xhci.0',
            '-display', 'none',
            '-spice', 'unix=on,addr=spice.sock,disable-ticketing=on,disable-copy-paste=on,disable-agent-file-xfer=on,gl=es',
@@ -76,6 +81,9 @@ def main():
                 '-device', 'usb-net,id=ethernet,netdev=googlebooknet,bus=xhci.0,mac=52:54:00:12:34:56']
     if not args.no_audio:
         cmd += ['-audiodev', 'coreaudio,id=audio0', '-device', 'usb-audio,audiodev=audio0,bus=xhci.0']
+    if args.webcam:
+        cmd += ['-chardev', 'socket,id=webcam,path=webcam.sock,server=on,wait=off',
+                '-device', 'usb-redir,chardev=webcam,id=webcam,bus=xhci.0']
     env = dict(os.environ, VM_QEMU_LIBRARY=str(host / 'qemu-aarch64-softmmu'),
                DYLD_FRAMEWORK_PATH=str(utm / 'Contents/Frameworks'),
                RENDER_SERVER_EXEC_PATH=str(host / 'virgl_render_server'),

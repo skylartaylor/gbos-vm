@@ -2,7 +2,7 @@
 """Unpack the pieces of Google's Cuttlefish image that the Googlebook VM borrows.
 
 Input:  aosp_cf_arm64_only_phone-img-16373615.zip from ci.android.com (never redistributed).
-Output: a folder with the software KeyMint/Gatekeeper/audio/boot-control packages, the
+Output: a folder with the software KeyMint/Gatekeeper/audio/boot-control/camera packages, the
         minigbm allocator and DRM composer binaries, and the virtio/DMA-heap kernel modules.
 
 Every file is read out of the image without mounting it. Needs dump.erofs (erofs-utils),
@@ -23,6 +23,7 @@ URL = ('https://ci.android.com/builds/submitted/16373615/aosp_cf_arm64_only_phon
 # 'vendor_boot' hold kernel modules.
 FILES = {
     'security/com.android.hardware.audio.apex': ('apex-file:com.android.hardware.audio.apex', None),
+    'camera/com.google.emulated.camera.provider.hal.v4l2.apex': ('apex-file:com.google.emulated.camera.provider.hal.v4l2.apex', None),
     'security/com.android.hardware.gatekeeper.nonsecure.apex': ('apex-file:com.android.hardware.gatekeeper.nonsecure.apex', None),
     'security/rust_nonsecure_payload.img': ('apex-payload:com.android.hardware.keymint.rust_nonsecure.apex', None),
     'security/boot-service.default': ('apex:com.android.hardware.boot.apex', '/bin/hw/android.hardware.boot-service.default'),

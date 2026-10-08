@@ -3,6 +3,7 @@
 #import "CocoaSpice.h"
 #import "CSDisplay+Protected.h"
 #import "CSMetalRenderer.h"
+#import "webcam.h"
 #import <sys/socket.h>
 #import <netinet/in.h>
 #import <netinet/tcp.h>
@@ -154,6 +155,7 @@ static unsigned short scan[128] = {
 @property(nonatomic) BOOL densitySent;
 @property(nonatomic) NSInteger guestDensity;
 @property(nonatomic,strong) NSPopUpButton *pointerPopup;
+@property(nonatomic,strong) GBWebcam *webcam;
 - (void)syncSettingsWindow;
 @property(nonatomic,strong) dispatch_source_t selftest;
 @property(nonatomic,strong) dispatch_source_t selftest2;
@@ -165,7 +167,7 @@ static unsigned short scan[128] = {
 @end
 @implementation App
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
- [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":@4096,@"CPUs":@6,@"Networking":@YES,@"Audio":@YES}];
+ [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":@4096,@"CPUs":@6,@"Networking":@YES,@"Audio":@YES,@"Camera":@YES}];
  self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,800) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
  self.view=[[VMView alloc] initWithFrame:self.window.contentView.bounds device:MTLCreateSystemDefaultDevice()];self.view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;self.view.preferredFramesPerSecond=120;self.view.clearColor=MTLClearColorMake(0,0,0,1);
@@ -237,6 +239,12 @@ static unsigned short scan[128] = {
  NSMutableArray *args=[@[runner,work,name,@"--display",res,@"--memory",[[d objectForKey:@"MemoryMiB"] description],@"--cpus",[[d objectForKey:@"CPUs"] description]] mutableCopy];
  if(![d boolForKey:@"Networking"])[args addObject:@"--offline"];
  if(![d boolForKey:@"Audio"])[args addObject:@"--no-audio"];
+ if([d boolForKey:@"Camera"]){
+  // The guest gets a USB webcam backed by this Mac's camera (host/webcam.m). It connects to the
+  // VM's usb-redir socket as soon as QEMU creates it; the camera only runs while Android streams.
+  [args addObject:@"--webcam"];
+  self.webcam=[[GBWebcam alloc] initWithSocketPath:[self.runDir stringByAppendingPathComponent:@"webcam.sock"]];[self.webcam start];
+ }
  NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];t.arguments=args;
  t.standardOutput=[NSFileHandle fileHandleWithNullDevice];t.standardError=[NSFileHandle fileHandleWithNullDevice];
  __weak App *weak=self;
@@ -351,10 +359,11 @@ static unsigned short scan[128] = {
    @[label(@"Memory:"),[self popup:@"MemoryMiB" titles:@[@"4 GB",@"6 GB",@"8 GB"] values:@[@4096,@6144,@8192]]],
    @[label(@"Processor cores:"),[self popup:@"CPUs" titles:@[@"4",@"6",@"8"] values:@[@4,@6,@8]]],
    @[[NSGridCell emptyContentView],[self checkbox:@"Networking" title:@"Networking (also needed for the pointer and clipboard link)"]],
-   @[[NSGridCell emptyContentView],[self checkbox:@"Audio" title:@"Audio output"]]]];
+   @[[NSGridCell emptyContentView],[self checkbox:@"Audio" title:@"Audio output"]],
+   @[[NSGridCell emptyContentView],[self checkbox:@"Camera" title:@"Camera (Android sees this Mac's camera as a USB webcam)"]]]];
   grid.rowSpacing=8;grid.columnSpacing=10;grid.translatesAutoresizingMaskIntoConstraints=NO;
   [grid columnAtIndex:0].xPlacement=NSGridCellPlacementTrailing;
-  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,520,370) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
+  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,400) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
   w.title=@"Googlebook Settings";w.releasedWhenClosed=NO;[w.contentView addSubview:grid];
   [NSLayoutConstraint activateConstraints:@[[grid.topAnchor constraintEqualToAnchor:w.contentView.topAnchor constant:20],[grid.leadingAnchor constraintEqualToAnchor:w.contentView.leadingAnchor constant:20],[grid.trailingAnchor constraintLessThanOrEqualToAnchor:w.contentView.trailingAnchor constant:-20],[grid.bottomAnchor constraintLessThanOrEqualToAnchor:w.contentView.bottomAnchor constant:-20]]];
   [w center];self.settingsWindow=w;
