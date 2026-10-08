@@ -22,10 +22,13 @@ for name in ('run_vm.py', 'vm_control.py'):
     'CFBundleIdentifier': 'local.googlebook.viewer', 'CFBundleName': 'Googlebook VM', 'GBOSWork': str(work),
     'CFBundleExecutable': 'GooglebookViewer', 'CFBundlePackageType': 'APPL', 'NSHighResolutionCapable': True,
     'NSCameraUsageDescription': 'Android in the VM uses this Mac’s camera as a USB webcam. '
-                                'It only runs while an Android app is using the camera.'}))
+                                'It only runs while an Android app is using the camera.',
+    'NSMicrophoneUsageDescription': 'Android in the VM uses this Mac’s microphone as a USB microphone. '
+                                    'It only runs while an Android app is recording.'}))
 skip = {'CSUSBDevice.m', 'CSUSBManager.m', 'CSSession+Sharing.m', 'gst_ios_init.m'}
 sources = [str(p) for p in sorted((S / 'CocoaSpice').glob('*.m')) if p.name not in skip]
-sources += [str(S / 'CocoaSpiceRenderer/CSMetalRenderer.m'), str(viewer_m), str(viewer_m.parent / 'webcam.m')]
+sources += [str(S / 'CocoaSpiceRenderer/CSMetalRenderer.m'), str(viewer_m), str(viewer_m.parent / 'webcam.m'),
+            str(viewer_m.parent / 'microphone.m')]
 cmd = ['clang', '-fobjc-arc', '-fblocks', '-fmodules', f'-fmodules-cache-path={build}/module-cache', '-O2',
        '-Wno-incomplete-implementation', '-w']
 headers = S / 'CocoaSpice/ExternalHeaders'

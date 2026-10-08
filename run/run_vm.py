@@ -2,7 +2,7 @@
 """Run the Googlebook VM once with an explicit QEMU command line.
 
   run_vm.py WORK RUN_NAME [--seconds N] [--snapshot] [--offline] [--no-audio] [--webcam]
-            [--display WxH] [--memory MIB] [--cpus N]
+            [--microphone] [--display WxH] [--memory MIB] [--cpus N]
 
 WORK is the build folder (host/, image/, UTM-beta/). Logs and sockets go to WORK/logs/RUN_NAME.
 The disk is written to unless --snapshot is given. Networking is QEMU user-mode NAT with no
@@ -11,6 +11,8 @@ On stop, Android is asked to power off through the guest control channel before 
 --webcam adds a usb-redir port on WORK/logs/RUN_NAME/webcam.sock; the viewer app connects to it
 and plugs in a USB camera backed by the Mac's camera (host/webcam.m). Nothing is plugged in until
 something connects, so the option is harmless on its own.
+--microphone does the same on mic.sock for a USB microphone backed by the Mac's microphone
+(host/microphone.m): QEMU's own audio devices and its coreaudio backend can only play sound.
 """
 import argparse, fcntl, json, os, secrets, signal, subprocess, sys
 from pathlib import Path
@@ -37,6 +39,7 @@ def main():
     a.add_argument('--seconds', type=int, default=3600)
     a.add_argument('--snapshot', action='store_true'); a.add_argument('--offline', action='store_true')
     a.add_argument('--no-audio', action='store_true'); a.add_argument('--webcam', action='store_true')
+    a.add_argument('--microphone', action='store_true')
     a.add_argument('--display', default='1920x1200'); a.add_argument('--memory', type=int, default=4096)
     a.add_argument('--cpus', type=int, default=6)
     a.add_argument('--image', help='image folder (default WORK/image)')
@@ -84,6 +87,9 @@ def main():
     if args.webcam:
         cmd += ['-chardev', 'socket,id=webcam,path=webcam.sock,server=on,wait=off',
                 '-device', 'usb-redir,chardev=webcam,id=webcam,bus=xhci.0']
+    if args.microphone:
+        cmd += ['-chardev', 'socket,id=mic,path=mic.sock,server=on,wait=off',
+                '-device', 'usb-redir,chardev=mic,id=mic,bus=xhci.0']
     env = dict(os.environ, VM_QEMU_LIBRARY=str(host / 'qemu-aarch64-softmmu'),
                DYLD_FRAMEWORK_PATH=str(utm / 'Contents/Frameworks'),
                RENDER_SERVER_EXEC_PATH=str(host / 'virgl_render_server'),

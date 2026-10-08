@@ -51,7 +51,7 @@ We build and test on one machine (M5, 16 GB, macOS 27). A couple of people have 
 
 Quitting (or closing the window) shuts Android down properly. Your data lives in `work/image/googlebook.raw` and sticks around between runs.
 
-**Settings** (`⌘,`) has the pointer mode, resolution, memory, CPU cores, and toggles for networking, audio and the camera. Pointer mode changes right away; everything else is a VM option, so it applies the next time you start it.
+**Settings** (`⌘,`) has the pointer mode, resolution, memory, CPU cores, and toggles for networking, audio, the camera and the microphone. Pointer mode changes right away; everything else is a VM option, so it applies the next time you start it.
 
 Resolution defaults to your display's native pixels at 16:10. On a notched MacBook that's exactly the area below the notch, so full screen is pixel-for-pixel.
 
@@ -68,13 +68,15 @@ There are two integrated modes where the pointer moves in and out of the window 
 
 Switch in the **Pointer** menu, in Settings, or with `⌃⌘M`. Your choice is remembered, and clipboard sync works in all three.
 
-### Camera
+### Camera and microphone
 
 Android sees your Mac's camera as a plugged-in USB webcam ("Mac Camera"), offered at 1280×720, 1920×1080 and 640×480, 30 fps. The first time an Android app opens it, macOS asks whether **Googlebook VM** may use the camera. The Mac camera (and its green light) only runs while an app is actually streaming from it, and switches off a few seconds after the app stops. Turn it off entirely in Settings.
 
+Your Mac's microphone shows up the same way, as a USB microphone ("Mac Microphone", 48 kHz mono). Recording video and calls need it: without one, Android's recorder waits for sound that never comes. macOS asks for microphone access the first time an app records, and the Mac microphone (and its orange dot) only runs while something in Android is recording. Turned off in Settings, Android has no microphone at all, so nothing that records sound (video included) will work.
+
 The built-in Camera app shows a live preview. Apps that draw camera frames themselves with OpenGL ES may still show black — see [What doesn't work yet](#what-doesnt-work-yet).
 
-The camera needs all three builds from this change: `build-host.sh` (the renderer), `build-guest.sh` (the guest Vulkan driver) and `build-image.sh` (which passes `--camera`). An older image just won't list a camera. `python3 run/vm_control.py work/logs/<run> VM_CAMERA_DIAG` prints what the guest sees.
+The camera needs all three builds from this change: `build-host.sh` (the renderer and the viewer), `build-guest.sh` (the guest Vulkan driver) and `build-image.sh` (which passes `--camera` and sets up USB audio input). An older image just won't list a camera or record from the microphone. `python3 run/vm_control.py work/logs/<run> VM_CAMERA_DIAG` prints what the guest sees.
 
 ## System Structure
 
@@ -84,6 +86,7 @@ The image starts as Google's unmodified recovery download. We don't touch the sy
 - **No verified boot on the vendor partition.** The other partitions keep their original verity; the one we modify can't.
 - **Three extra SELinux rules**, all narrowly about graphics buffer sharing. SELinux stays enforcing.
 - **AOSP's V4L2 camera provider** (Cuttlefish's build) instead of Googlebook's USB camera HAL, plus one service label for it in `vendor_service_contexts`. The SELinux policy itself is unchanged.
+- **Cuttlefish's audio configuration, edited for a USB microphone:** an input-only USB audio module is added, and the built-in microphone the VM doesn't have is removed.
 - **A helper running as the Android shell user** that takes pointer and clipboard input from the viewer. It only accepts a host that presents a random per-boot token, and it listens to nothing — it connects out to `127.0.0.1` on your Mac.
 
 So: treat it like a dev VM. It's great for poking at the OS. I wouldn’t daily drive it or anything, but I’m sure some freaks (laudatory) will try.
@@ -108,7 +111,7 @@ Five things had to be built for this:
 
 **A pointer that isn't a mouse.** Android wouldn't accept QEMU's absolute tablet, and steering a relative mouse to match your real cursor drifts. So a tiny helper inside the guest creates a virtual drawing tablet — which Android treats as an absolute pointer — and the viewer feeds it coordinates. This doesn’t work as well as we’d like, so capturing the cursor is most reliable still. We’re hoping to improve it.
 
-**A webcam that is really a process.** QEMU on macOS has no virtual camera, and the Mac's camera isn't a USB device it could pass through. But QEMU's `usb-redir` lets something outside the VM *be* a USB device, so the viewer speaks that protocol over a socket and presents a standard UVC webcam (MJPEG over a bulk endpoint) fed by AVFoundation — `host/webcam.m`. The guest kernel already has `uvcvideo`. Googlebook OS ships its own USB camera HAL, but it runs every session through GPU effects (OpenGL, OpenCL, Vulkan with external memory) the VM can't provide, so the image retires it and adds AOSP's plain V4L2 camera provider from Cuttlefish instead — `image/mica_camera_port.py`.
+**A webcam that is really a process.** QEMU on macOS has no virtual camera, and the Mac's camera isn't a USB device it could pass through. But QEMU's `usb-redir` lets something outside the VM *be* a USB device, so the viewer speaks that protocol over a socket and presents a standard UVC webcam (MJPEG over a bulk endpoint) fed by AVFoundation — `host/webcam.m`. The guest kernel already has `uvcvideo`. Googlebook OS ships its own USB camera HAL, but it runs every session through GPU effects (OpenGL, OpenCL, Vulkan with external memory) the VM can't provide, so the image retires it and adds AOSP's plain V4L2 camera provider from Cuttlefish instead — `image/mica_camera_port.py`. The microphone is the same trick (`host/microphone.m`): QEMU's own audio devices and its coreaudio backend can only play sound, so the viewer presents a USB Audio Class microphone and streams one isochronous packet per millisecond from AVAudioEngine. Android then needed two changes before it would record from it. Cuttlefish's audio setup has no USB module at all, so the image adds one for input only (the speaker stays on the module that already plays it). And it declares a built-in microphone, which Android picks over a USB one when recording video; the VM has none, so the image removes it — `image/mica_audio_port.py`.
 
 **Camera frames on a GPU path with no YUV.** Camera frames are YUV: a full-size brightness plane plus a half-size colour plane. On Linux hosts those go through gbm; macOS has nothing like it. Android's allocator already has a fallback for that case — keep both planes in one plain 8-bit texture — but the renderer claimed the Mac could put YUV on screen, which switched the fallback off, so no camera buffer could be allocated at all. Now the renderer stops claiming that, stores the YUV buffers it is asked for directly in the same packed layout, and shares them through the same shared memory as above. The guest's Vulkan driver reads both planes from the buffer's metadata and imports it as a two-plane image, and MoltenVK converts it to RGB as it samples — `patches/virglrenderer-android-interop.patch` and `patches/mesa-android-mapper5.patch`.
 
