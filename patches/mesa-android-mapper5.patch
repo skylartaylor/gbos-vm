@@ -55,6 +55,55 @@
     gr->base.ops.destroy = destroy;
  
     mesa_logi("Using fallback gralloc implementation");
+--- a/src/vulkan/runtime/vk_android.c
++++ b/src/vulkan/runtime/vk_android.c
+@@ -178,13 +178,12 @@
+       out_layouts[i].rowPitch = info.strides[i];
+    }
+ 
+-   if (info.drm_fourcc == DRM_FORMAT_YVU420) {
+-      /* Swap the U and V planes to match the
+-       * VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM */
+-      VkSubresourceLayout tmp = out_layouts[1];
+-      out_layouts[1] = out_layouts[2];
+-      out_layouts[2] = tmp;
+-   }
++   /* YV12 (DRM_FORMAT_YVU420) keeps its memory order, V before U, so plane 1
++    * of VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM holds Cr and plane 2 holds Cb.
++    * The host (Venus over MoltenVK) can only place the planes of a linear
++    * image in order, so swapping the layouts here would describe a buffer it
++    * can't bind.  vn_CreateSamplerYcbcrConversion swaps the chroma back.
++    */
+ 
+    return VK_SUCCESS;
+ }
+@@ -936,7 +935,9 @@
+ 
+    switch (info.drm_fourcc) {
+    case DRM_FORMAT_YVU420:
+-      /* Assuming that U and V planes are swapped earlier */
++      /* Planes stay in memory order (Cr before Cb), see
++       * vk_gralloc_to_drm_explicit_layout; conversions for this external
++       * format swap the chroma back (vn_CreateSamplerYcbcrConversion). */
+       external_format = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+       break;
+    case DRM_FORMAT_NV12:
+--- a/src/virtio/vulkan/vn_image.c
++++ b/src/virtio/vulkan/vn_image.c
+@@ -930,6 +930,13 @@
+       local_info.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+       local_info.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+       local_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
++      /* The only three-plane external format is YV12, bound with its planes
++       * in memory order: Cr in the B plane and Cb in the R plane (see
++       * vk_gralloc_to_drm_explicit_layout).  Swap them back. */
++      if (local_info.format == VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM) {
++         local_info.components.r = VK_COMPONENT_SWIZZLE_B;
++         local_info.components.b = VK_COMPONENT_SWIZZLE_R;
++      }
+       pCreateInfo = &local_info;
+ 
+       assert(pCreateInfo->format != VK_FORMAT_UNDEFINED);
 --- /dev/null
 +++ b/src/util/u_gralloc/u_gralloc_vm_mapper5.cpp
 @@ -0,0 +1,92 @@

@@ -74,7 +74,7 @@ Android sees your Mac's camera as a plugged-in USB webcam ("Mac Camera"), offere
 
 Your Mac's microphone shows up the same way, as a USB microphone ("Mac Microphone", 48 kHz mono). Recording video and calls need it: without one, Android's recorder waits for sound that never comes. macOS asks for microphone access the first time an app records, and the Mac microphone (and its orange dot) only runs while something in Android is recording. Turned off in Settings, Android has no microphone at all, so nothing that records sound (video included) will work.
 
-The built-in Camera app shows a live preview. Apps that draw camera frames themselves with OpenGL ES may still show black — see [What doesn't work yet](#what-doesnt-work-yet).
+The built-in Camera app shows a live preview and records video with sound, and the recordings play back. Apps that draw camera or video frames themselves with OpenGL ES may still show black — see [What doesn't work yet](#what-doesnt-work-yet).
 
 The camera needs all three builds from this change: `build-host.sh` (the renderer and the viewer), `build-guest.sh` (the guest Vulkan driver) and `build-image.sh` (which passes `--camera` and sets up USB audio input). An older image just won't list a camera or record from the microphone. `python3 run/vm_control.py work/logs/<run> VM_CAMERA_DIAG` prints what the guest sees.
 
@@ -94,7 +94,9 @@ So: treat it like a dev VM. It's great for poking at the OS. I wouldn’t daily 
 ## What doesn't work yet
 
 - **Bluetooth.** It crashes on boot and Android will tell you about it. Dismiss the dialog.
-- **Camera frames in OpenGL ES apps.** Android itself draws camera previews with Vulkan here, and that works. An app that samples the camera frames with OpenGL ES instead (through a `SurfaceTexture`) gets a black or broken image: the guest's OpenGL ES driver can't read the camera's two-plane YUV buffers yet.
+- **Camera and video frames in OpenGL ES apps.** Android itself draws camera previews and video with Vulkan here, and that works. An app that samples those frames with OpenGL ES instead (through a `SurfaceTexture`) gets a black or broken image: the guest's OpenGL ES driver can't read YUV buffers yet.
+- **Switching the Camera app to video pauses for about five seconds.** The camera service waits for the old stream to finish, gives up, and reopens the camera.
+- **Video whose width isn't a multiple of 32 pixels** (720-wide SD video, say) should get a thin strip of padding along its right edge. The usual HD sizes are fine.
 - **A TPM daemon crash-loops in the background.** It's harmless but it wastes a bit of CPU. We haven't found a clean way to stop it yet.
 - **60 fps cap** on the guest display. The QEMU build we use doesn't expose a refresh rate setting.
 - **Flat shading can be wrong.** Chrome needs a Vulkan extension MoltenVK doesn't have, so we tell the guest it exists. That's fine for almost everything; `flat`-interpolated WebGL content may pick the wrong vertex.
@@ -103,7 +105,7 @@ So: treat it like a dev VM. It's great for poking at the OS. I wouldn’t daily 
 
 ## The Custom Bits
 
-Five things had to be built for this:
+Six things had to be built for this:
 
 **Buffer sharing between GLES and Vulkan.** Android hands the same graphics buffer to both APIs. On Linux that's a dma-buf; macOS has no such thing. We back each shared buffer with POSIX shared memory and import it into both Metal and MoltenVK — patch in `patches/virglrenderer-android-interop.patch`.
 
@@ -114,6 +116,8 @@ Five things had to be built for this:
 **A webcam that is really a process.** QEMU on macOS has no virtual camera, and the Mac's camera isn't a USB device it could pass through. But QEMU's `usb-redir` lets something outside the VM *be* a USB device, so the viewer speaks that protocol over a socket and presents a standard UVC webcam (MJPEG over a bulk endpoint) fed by AVFoundation — `host/webcam.m`. The guest kernel already has `uvcvideo`. Googlebook OS ships its own USB camera HAL, but it runs every session through GPU effects (OpenGL, OpenCL, Vulkan with external memory) the VM can't provide, so the image retires it and adds AOSP's plain V4L2 camera provider from Cuttlefish instead — `image/mica_camera_port.py`. The microphone is the same trick (`host/microphone.m`): QEMU's own audio devices and its coreaudio backend can only play sound, so the viewer presents a USB Audio Class microphone and streams one isochronous packet per millisecond from AVAudioEngine. Android then needed two changes before it would record from it. Cuttlefish's audio setup has no USB module at all, so the image adds one for input only (the speaker stays on the module that already plays it). And it declares a built-in microphone, which Android picks over a USB one when recording video; the VM has none, so the image removes it — `image/mica_audio_port.py`.
 
 **Camera frames on a GPU path with no YUV.** Camera frames are YUV: a full-size brightness plane plus a half-size colour plane. On Linux hosts those go through gbm; macOS has nothing like it. Android's allocator already has a fallback for that case — keep both planes in one plain 8-bit texture — but the renderer claimed the Mac could put YUV on screen, which switched the fallback off, so no camera buffer could be allocated at all. Now the renderer stops claiming that, stores the YUV buffers it is asked for directly in the same packed layout, and shares them through the same shared memory as above. The guest's Vulkan driver reads both planes from the buffer's metadata and imports it as a two-plane image, and MoltenVK converts it to RGB as it samples — `patches/virglrenderer-android-interop.patch` and `patches/mesa-android-mapper5.patch`.
+
+**Video frames, with three planes.** Android's software video decoders hand the screen YV12 frames: brightness plus two quarter-size colour planes, V before U. The allocator's fallback for those pads every colour row to the full brightness width, which no Vulkan image can describe, and when the compositor can't import a frame it aborts and takes the whole UI down with it. So the renderer now accepts real YV12 buffers too, stored the same packed way, which keeps the colour rows at half width. MoltenVK lays an image's planes out in order, so the guest's Vulkan driver binds them in memory order and swaps the two colour channels back as it converts. Where the guest pads rows more than the Mac would (to 32 bytes rather than 16), the Mac-side image is made that much wider, so every plane still lines up.
 
 The rest is plumbing: `fetch.sh` gets the images, `build-host.sh` builds the patched renderer and viewer, `build-guest.sh` cross-compiles Mesa for Android, and `build-image.sh` assembles the disk.
 

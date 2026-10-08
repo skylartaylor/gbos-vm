@@ -34,10 +34,10 @@ index c5417db..1461895 100644
        close_res_fd = true;
     }
 diff --git a/src/venus/vkr_common.h b/src/venus/vkr_common.h
-index 283794b..4e865d4 100644
+index 283794b..a2629b7 100644
 --- a/src/venus/vkr_common.h
 +++ b/src/venus/vkr_common.h
-@@ -85,6 +85,42 @@
+@@ -85,6 +85,59 @@
  #define DRM_FORMAT_MOD_LINEAR (0)
  #endif
  
@@ -74,6 +74,23 @@ index 283794b..4e865d4 100644
 +      return 3;
 +   default:
 +      return 1;
++   }
++}
++
++/* Bytes per texel in plane 0 (luma) of a multi-plane format, 0 otherwise. */
++static inline uint32_t
++vkr_format_luma_texel_size(VkFormat format)
++{
++   switch (format) {
++   case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
++   case VK_FORMAT_G8_B8R8_2PLANE_422_UNORM:
++   case VK_FORMAT_G8_B8R8_2PLANE_444_UNORM:
++   case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
++   case VK_FORMAT_G8_B8_R8_3PLANE_422_UNORM:
++   case VK_FORMAT_G8_B8_R8_3PLANE_444_UNORM:
++      return 1;
++   default:
++      return vkr_format_plane_count(format) > 1 ? 2 : 0;
 +   }
 +}
 +
@@ -313,7 +330,7 @@ index 1c460fd..ad9589c 100644
        args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
        return;
 diff --git a/src/venus/vkr_image.c b/src/venus/vkr_image.c
-index c9d9964..abc682b 100644
+index c9d9964..c94ec78 100644
 --- a/src/venus/vkr_image.c
 +++ b/src/venus/vkr_image.c
 @@ -17,8 +17,11 @@ vkr_image_fix_create_info(struct vkr_device *dev, VkImageCreateInfo *pCreateInfo
@@ -345,7 +362,91 @@ index c9d9964..abc682b 100644
     return VK_ERROR_FORMAT_NOT_SUPPORTED;
  }
  
-@@ -93,7 +105,55 @@ vkr_dispatch_vkCreateImage(struct vn_dispatch_context *dispatch,
+@@ -59,6 +71,83 @@ vkr_image_emulate_drm_format_modifier_properties(UNUSED struct vkr_device *dev,
+    return VK_SUCCESS;
+ }
+ 
++/* Whether the host image puts every plane where the guest's buffer has it. */
++static bool
++vkr_image_layout_matches(struct vkr_device *dev,
++                         VkImage image,
++                         const VkImageCreateInfo *info,
++                         const VkImageDrmFormatModifierExplicitCreateInfoEXT *explicit_layout,
++                         uint32_t plane_count,
++                         bool quiet)
++{
++   for (uint32_t i = 0; i < plane_count; i++) {
++      const VkImageSubresource sub = {
++         .aspectMask = plane_count > 1 ? (VkImageAspectFlags)VK_IMAGE_ASPECT_PLANE_0_BIT << i
++                                       : VK_IMAGE_ASPECT_COLOR_BIT,
++      };
++      VkSubresourceLayout actual;
++      dev->proc_table.GetImageSubresourceLayout(dev->base.handle.device, image, &sub,
++                                                &actual);
++      const VkSubresourceLayout *expected = &explicit_layout->pPlaneLayouts[i];
++      /* The shared memory is host-only (the guest reaches pixels through
++       * transfers), so the host pitch may exceed the guest-declared one.  That
++       * only works for a single plane: further planes would then start at a
++       * different offset than the one the host-side copy of the buffer uses. */
++      if (actual.rowPitch != expected->rowPitch && plane_count == 1)
++         vkr_log("interop: host pitch %llu replaces guest pitch %llu for %ux%u plane %u",
++                 (unsigned long long)actual.rowPitch,
++                 (unsigned long long)expected->rowPitch,
++                 info->extent.width, info->extent.height, i);
++      if (actual.offset != expected->offset || actual.rowPitch < expected->rowPitch ||
++          (plane_count > 1 && actual.rowPitch != expected->rowPitch)) {
++         if (!quiet)
++            vkr_log("interop: incompatible image pitch/offset for plane %u: host %llu/%llu guest %llu/%llu",
++                    i, (unsigned long long)actual.rowPitch, (unsigned long long)actual.offset,
++                    (unsigned long long)expected->rowPitch,
++                    (unsigned long long)expected->offset);
++         return false;
++      }
++   }
++   return true;
++}
++
++/* Guest gralloc pads rows to its own alignment (YV12 luma rows to 32 bytes,
++ * where the host pads linear rows to 16), and a multi-plane image can't take a
++ * guest pitch the way a single plane does: the later planes would move.  Make
++ * the host image as wide as the guest's luma rows instead.  When every plane
++ * then lines up, the extra columns are the padding the guest buffer already
++ * has; samples near the right edge pick up a sliver of it. */
++static bool
++vkr_image_widen_to_guest_pitch(struct vkr_device *dev,
++                               struct vkr_image *image,
++                               VkImageCreateInfo *info,
++                               const VkImageDrmFormatModifierExplicitCreateInfoEXT *explicit_layout,
++                               uint32_t plane_count)
++{
++   const uint32_t texel = vkr_format_luma_texel_size(info->format);
++   const uint64_t pitch = explicit_layout->pPlaneLayouts[0].rowPitch;
++   const uint32_t width = info->extent.width;
++   if (plane_count < 2 || !texel || pitch % texel || pitch / texel <= width ||
++       pitch / texel >= (uint64_t)width + 64)
++      return false;
++
++   VkImage wider;
++   info->extent.width = (uint32_t)(pitch / texel);
++   VkResult result = dev->proc_table.CreateImage(dev->base.handle.device, info, NULL, &wider);
++   info->extent.width = width;
++   if (result != VK_SUCCESS)
++      return false;
++   if (!vkr_image_layout_matches(dev, wider, info, explicit_layout, plane_count, true)) {
++      dev->proc_table.DestroyImage(dev->base.handle.device, wider, NULL);
++      return false;
++   }
++   dev->proc_table.DestroyImage(dev->base.handle.device, image->base.handle.image, NULL);
++   image->base.handle.image = wider;
++   vkr_log("interop: %u-plane image %ux%u made %llu wide to match the guest's row padding",
++           plane_count, width, info->extent.height, (unsigned long long)(pitch / texel));
++   return true;
++}
++
+ static void
+ vkr_dispatch_vkCreateImage(struct vn_dispatch_context *dispatch,
+                            struct vn_command_vkCreateImage *args)
+@@ -93,7 +182,39 @@ vkr_dispatch_vkCreateImage(struct vn_dispatch_context *dispatch,
      * situation because the app does not consider the memory external.
      */
  
@@ -365,34 +466,18 @@ index c9d9964..abc682b 100644
 +   struct vkr_image *image = vkr_image_create(dispatch->data, args);
 +   if (!image)
 +      return;
-+   for (uint32_t i = 0; validate_layout && i < plane_count; i++) {
-+      const VkImageSubresource sub = {
-+         .aspectMask = plane_count > 1 ? (VkImageAspectFlags)VK_IMAGE_ASPECT_PLANE_0_BIT << i
-+                                       : VK_IMAGE_ASPECT_COLOR_BIT,
-+      };
-+      VkSubresourceLayout actual;
-+      dev->proc_table.GetImageSubresourceLayout(dev->base.handle.device,
-+         image->base.handle.image, &sub, &actual);
-+      const VkSubresourceLayout *expected = &explicit_layout->pPlaneLayouts[i];
-+      /* The shared memory is host-only (the guest reaches pixels through
-+       * transfers), so the host pitch may exceed the guest-declared one.  That
-+       * only works for a single plane: further planes would then start at a
-+       * different offset than the one the host-side copy of the buffer uses. */
-+      if (actual.rowPitch != expected->rowPitch)
-+         vkr_log("interop: host pitch %llu replaces guest pitch %llu for %ux%u plane %u",
-+                 (unsigned long long)actual.rowPitch,
-+                 (unsigned long long)expected->rowPitch,
-+                 args->pCreateInfo->extent.width, args->pCreateInfo->extent.height, i);
-+      if (actual.offset != expected->offset || actual.rowPitch < expected->rowPitch ||
-+          (plane_count > 1 && actual.rowPitch != expected->rowPitch)) {
-+         vkr_log("interop: incompatible image pitch/offset for plane %u: host %llu/%llu guest %llu/%llu",
-+                 i, (unsigned long long)actual.rowPitch, (unsigned long long)actual.offset,
-+                 (unsigned long long)expected->rowPitch, (unsigned long long)expected->offset);
-+         dev->proc_table.DestroyImage(dev->base.handle.device, image->base.handle.image, NULL);
-+         free(image);
-+         args->ret = VK_ERROR_FORMAT_NOT_SUPPORTED;
-+         return;
-+      }
++   if (validate_layout &&
++       !vkr_image_layout_matches(dev, image->base.handle.image, args->pCreateInfo,
++                                 explicit_layout, plane_count, plane_count > 1) &&
++       !vkr_image_widen_to_guest_pitch(dev, image, (VkImageCreateInfo *)args->pCreateInfo,
++                                       explicit_layout, plane_count)) {
++      if (plane_count > 1)   /* say why, now that widening didn't help either */
++         vkr_image_layout_matches(dev, image->base.handle.image, args->pCreateInfo,
++                                  explicit_layout, plane_count, false);
++      dev->proc_table.DestroyImage(dev->base.handle.device, image->base.handle.image, NULL);
++      free(image);
++      args->ret = VK_ERROR_FORMAT_NOT_SUPPORTED;
++      return;
 +   }
 +   if (validate_layout && plane_count > 1)
 +      vkr_log("interop: %u-plane image format %u %ux%u on shared memory", plane_count,
@@ -581,7 +666,7 @@ index e8ded74..ef13676 100644
     /* newBufferWithBytesNoCopy requires a page-aligned pointer and length */
     const size_t page_size = getpagesize();
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index e6ae007..0ed1a3d 100644
+index e6ae007..31735b9 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -40,6 +40,8 @@
@@ -802,6 +887,26 @@ index e6ae007..0ed1a3d 100644
     if (!vrend_hw_switch_context(ctx, true))
        return EINVAL;
  
+@@ -12871,6 +12997,19 @@ static void vrend_renderer_fill_caps_v1(int gl_ver, int gles_ver, union virgl_ca
+       }
+    }
+ 
++#if !defined(ENABLE_GBM_ALLOCATION)
++   /* Real YV12 resources are stored packed (vrend_resource_pack_yuv) and Venus
++    * samples them as three-plane images.  Saying so makes guest minigbm
++    * allocate video decoder output that the compositor samples as real YV12,
++    * whose half-width chroma rows match a three-plane image on the host.  Its
++    * own fallback (one 8-bit texture) pads every chroma row to the full luma
++    * width, which no host image can describe, and the compositor aborts when
++    * it can't import a frame.  Guest GL never samples planar YUV directly
++    * (Mesa splits it into planes first), so only the allocator acts on this.
++    */
++   set_format_bit(&caps->v1.sampler, VIRGL_FORMAT_YV12);
++#endif
++
+    /* These are filled in by the init code, so are common. */
+    if (has_feature(feat_nv_prim_restart) ||
+        has_feature(feat_gl_prim_restart)) {
 diff --git a/src/vrend/vrend_renderer.h b/src/vrend/vrend_renderer.h
 index 814eb7e..5dfc87c 100644
 --- a/src/vrend/vrend_renderer.h
