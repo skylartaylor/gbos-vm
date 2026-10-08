@@ -10,12 +10,14 @@
  if dep_android_ui.found()
 --- a/src/util/u_gralloc/u_gralloc_internal.h
 +++ b/src/util/u_gralloc/u_gralloc_internal.h
-@@ -38,6 +38,8 @@
+@@ -38,6 +38,10 @@
  extern struct u_gralloc *u_gralloc_qcom_create(void);
  extern struct u_gralloc *u_gralloc_libdrm_create(void);
  extern struct u_gralloc *u_gralloc_fallback_create(void);
 +int u_gralloc_vm_mapper5_info(struct u_gralloc_buffer_handle *hnd,
 +                            struct u_gralloc_buffer_basic_info *out);
++int u_gralloc_vm_mapper5_color_info(struct u_gralloc_buffer_handle *hnd,
++                                  struct u_gralloc_buffer_color_info *out);
  
  /* Helpers for legacy grallocs */
  struct android_ycbcr;
@@ -30,11 +32,84 @@
     int num_planes = 0;
     int drm_fourcc = 0;
     int stride = 0;
+@@ -160,6 +162,14 @@
+ }
+ 
+ static int
++fallback_gralloc_get_buffer_color_info(UNUSED struct u_gralloc *gralloc,
++                                       struct u_gralloc_buffer_handle *hnd,
++                                       struct u_gralloc_buffer_color_info *out)
++{
++   return u_gralloc_vm_mapper5_color_info(hnd, out);
++}
++
++static int
+ destroy(struct u_gralloc *gralloc)
+ {
+    struct fallback_gralloc *gr = (struct fallback_gralloc *)gralloc;
+@@ -190,6 +200,7 @@
+    }
+ 
+    gr->base.ops.get_buffer_basic_info = fallback_gralloc_get_buffer_info;
++   gr->base.ops.get_buffer_color_info = fallback_gralloc_get_buffer_color_info;
+    gr->base.ops.destroy = destroy;
+ 
+    mesa_logi("Using fallback gralloc implementation");
+--- a/src/vulkan/runtime/vk_android.c
++++ b/src/vulkan/runtime/vk_android.c
+@@ -178,13 +178,12 @@
+       out_layouts[i].rowPitch = info.strides[i];
+    }
+ 
+-   if (info.drm_fourcc == DRM_FORMAT_YVU420) {
+-      /* Swap the U and V planes to match the
+-       * VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM */
+-      VkSubresourceLayout tmp = out_layouts[1];
+-      out_layouts[1] = out_layouts[2];
+-      out_layouts[2] = tmp;
+-   }
++   /* YV12 (DRM_FORMAT_YVU420) keeps its memory order, V before U, so plane 1
++    * of VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM holds Cr and plane 2 holds Cb.
++    * The host (Venus over MoltenVK) can only place the planes of a linear
++    * image in order, so swapping the layouts here would describe a buffer it
++    * can't bind.  vn_CreateSamplerYcbcrConversion swaps the chroma back.
++    */
+ 
+    return VK_SUCCESS;
+ }
+@@ -936,7 +935,9 @@
+ 
+    switch (info.drm_fourcc) {
+    case DRM_FORMAT_YVU420:
+-      /* Assuming that U and V planes are swapped earlier */
++      /* Planes stay in memory order (Cr before Cb), see
++       * vk_gralloc_to_drm_explicit_layout; conversions for this external
++       * format swap the chroma back (vn_CreateSamplerYcbcrConversion). */
+       external_format = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+       break;
+    case DRM_FORMAT_NV12:
+--- a/src/virtio/vulkan/vn_image.c
++++ b/src/virtio/vulkan/vn_image.c
+@@ -930,6 +930,13 @@
+       local_info.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+       local_info.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+       local_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
++      /* The only three-plane external format is YV12, bound with its planes
++       * in memory order: Cr in the B plane and Cb in the R plane (see
++       * vk_gralloc_to_drm_explicit_layout).  Swap them back. */
++      if (local_info.format == VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM) {
++         local_info.components.r = VK_COMPONENT_SWIZZLE_B;
++         local_info.components.b = VK_COMPONENT_SWIZZLE_R;
++      }
+       pCreateInfo = &local_info;
+ 
+       assert(pCreateInfo->format != VK_FORMAT_UNDEFINED);
 --- /dev/null
 +++ b/src/util/u_gralloc/u_gralloc_vm_mapper5.cpp
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,92 @@
 +/* VM-specific helper: use the installed minigbm stable-C mapper metadata.
-+ * Decoder follows AOSP Gralloc4.cpp; supports bounded, single-fd color layouts.
++ * Decoder follows AOSP Gralloc4.cpp; supports bounded, single-fd layouts of up
++ * to four planes (RGB buffers, and the YUV buffers of cameras and decoders).
 + * This is scoped to this VM's explicit mapper.minigbm module, not a generic
 + * Android mapper discovery implementation.
 + */
@@ -85,16 +160,43 @@
 +   if(!metadata(m,hnd->handle,7,fourcc)||!metadata(m,hnd->handle,8,modifier)||!metadata(m,hnd->handle,15,planes))return -1;
 +   struct u_gralloc_buffer_basic_info info={};
 +   uint64_t count;
-+   if(!fourcc.bytes(&info.drm_fourcc,4)||fourcc.pos!=fourcc.size||!modifier.integer(info.modifier)||modifier.pos!=modifier.size||!planes.integer(count)||count!=1)return -1;
-+   info.num_planes=1;info.fds[0]=hnd->handle->data[0];
-+   uint64_t components,unused;
-+   if(!planes.integer(components)||components>16)return -1;
-+   for(uint64_t i=0;i<components;i++)
-+      if(!planes.string_skip()||!planes.integer(unused)||!planes.integer(unused)||!planes.integer(unused))return -1;
-+   uint64_t fields[8];for(auto &v:fields)if(!planes.integer(v))return -1;
-+   if(planes.pos!=planes.size||fields[0]>INT_MAX||!fields[2]||fields[2]>INT_MAX)return -1;
-+   info.offsets[0]=fields[0];info.strides[0]=fields[2];*out=info;
-+   mesa_logi("VM mapper5 metadata: modifier=%llx stride=%d offset=%d",(unsigned long long)info.modifier,info.strides[0],info.offsets[0]);
++   if(!fourcc.bytes(&info.drm_fourcc,4)||fourcc.pos!=fourcc.size||!modifier.integer(info.modifier)||modifier.pos!=modifier.size||!planes.integer(count)||count<1||count>4)return -1;
++   info.num_planes=(int)count;
++   // minigbm keeps every plane of a buffer in its first fd, at plane offsets.
++   for(uint64_t p=0;p<count;p++){
++      uint64_t components,unused;
++      if(!planes.integer(components)||components>16)return -1;
++      for(uint64_t i=0;i<components;i++)
++         if(!planes.string_skip()||!planes.integer(unused)||!planes.integer(unused)||!planes.integer(unused))return -1;
++      uint64_t fields[8];for(auto &v:fields)if(!planes.integer(v))return -1;
++      if(fields[0]>INT_MAX||!fields[2]||fields[2]>INT_MAX)return -1;
++      info.fds[p]=hnd->handle->data[0];info.offsets[p]=(int)fields[0];info.strides[p]=(int)fields[2];
++   }
++   if(planes.pos!=planes.size)return -1;
++   *out=info;
++   mesa_logi("VM mapper5 metadata: fourcc=%.4s modifier=%llx planes=%d stride=%d offset=%d",
++             (const char *)&info.drm_fourcc,(unsigned long long)info.modifier,info.num_planes,
++             info.strides[0],info.offsets[info.num_planes-1]);
++   return 0;
++}
++// YUV colour details from the buffer's dataspace (set by whoever queued it, e.g.
++// the camera service). Anything not stated keeps Android's defaults for YUV.
++extern "C" int
++u_gralloc_vm_mapper5_color_info(struct u_gralloc_buffer_handle *hnd,struct u_gralloc_buffer_color_info *out) {
++   *out={__DRI_YUV_COLOR_SPACE_ITU_REC601,__DRI_YUV_NARROW_RANGE,__DRI_YUV_CHROMA_SITING_0_5,__DRI_YUV_CHROMA_SITING_0_5};
++   AIMapper *m=mapper();if(!m||!hnd->handle)return 0;
++   Reader ds;int32_t d=0;
++   if(!metadata(m,hnd->handle,17,ds)||!ds.bytes(&d,4))return 0;
++   const uint32_t standard=(uint32_t)d&(63u<<16),range=(uint32_t)d&(7u<<27);
++   switch((uint32_t)d){
++   case 0x101: out->sample_range=__DRI_YUV_FULL_RANGE;return 0;              // legacy JFIF
++   case 0x102: case 0x103: return 0;                                          // legacy BT601
++   case 0x104: out->yuv_color_space=__DRI_YUV_COLOR_SPACE_ITU_REC709;return 0; // legacy BT709
++   default: break;
++   }
++   if(standard==(1u<<16))out->yuv_color_space=__DRI_YUV_COLOR_SPACE_ITU_REC709;
++   else if(standard==(6u<<16)||standard==(7u<<16))out->yuv_color_space=__DRI_YUV_COLOR_SPACE_ITU_REC2020;
++   if(range==(1u<<27)||range==(3u<<27))out->sample_range=__DRI_YUV_FULL_RANGE;
 +   return 0;
 +}
 --- /dev/null
@@ -791,3 +893,4 @@
 +AIMapper_Error AIMapper_loadIMapper(AIMapper* _Nullable* _Nonnull outImplementation);
 +
 +__END_DECLS
+\ No newline at end of file

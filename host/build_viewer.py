@@ -20,10 +20,15 @@ for name in ('run_vm.py', 'vm_control.py'):
     shutil.copyfile(run_scripts / name, app / 'Resources' / name)
 (app / 'Info.plist').write_bytes(plistlib.dumps({
     'CFBundleIdentifier': 'local.googlebook.viewer', 'CFBundleName': 'Googlebook VM', 'GBOSWork': str(work),
-    'CFBundleExecutable': 'GooglebookViewer', 'CFBundlePackageType': 'APPL', 'NSHighResolutionCapable': True}))
+    'CFBundleExecutable': 'GooglebookViewer', 'CFBundlePackageType': 'APPL', 'NSHighResolutionCapable': True,
+    'NSCameraUsageDescription': 'Android in the VM uses this Mac’s camera as a USB webcam. '
+                                'It only runs while an Android app is using the camera.',
+    'NSMicrophoneUsageDescription': 'Android in the VM uses this Mac’s microphone as a USB microphone. '
+                                    'It only runs while an Android app is recording.'}))
 skip = {'CSUSBDevice.m', 'CSUSBManager.m', 'CSSession+Sharing.m', 'gst_ios_init.m'}
 sources = [str(p) for p in sorted((S / 'CocoaSpice').glob('*.m')) if p.name not in skip]
-sources += [str(S / 'CocoaSpiceRenderer/CSMetalRenderer.m'), str(viewer_m)]
+sources += [str(S / 'CocoaSpiceRenderer/CSMetalRenderer.m'), str(viewer_m), str(viewer_m.parent / 'webcam.m'),
+            str(viewer_m.parent / 'microphone.m')]
 cmd = ['clang', '-fobjc-arc', '-fblocks', '-fmodules', f'-fmodules-cache-path={build}/module-cache', '-O2',
        '-Wno-incomplete-implementation', '-w']
 headers = S / 'CocoaSpice/ExternalHeaders'
@@ -31,7 +36,8 @@ for p in [build / 'modules', S / 'CocoaSpice/include', S / 'CocoaSpice', S / 'Co
           S / 'CocoaSpiceRenderer', headers, *[headers / n for n in ('glib-2.0', 'gstreamer-1.0', 'spice-1', 'spice-client-glib-2.0')]]:
     cmd += ['-I', str(p)]
 cmd += sources
-for n in ('AppKit', 'Metal', 'MetalKit', 'CoreGraphics', 'CoreImage', 'IOSurface', 'CoreVideo'):
+for n in ('AppKit', 'Metal', 'MetalKit', 'CoreGraphics', 'CoreImage', 'IOSurface', 'CoreVideo',
+          'AVFoundation', 'CoreMedia', 'ImageIO'):
     cmd += ['-framework', n]
 for n in ('spice-client-glib-2.0.8', 'glib-2.0.0', 'gobject-2.0.0', 'gio-2.0.0', 'gstreamer-1.0.0'):
     cmd.append(str(frameworks / (n + '.framework') / n))
