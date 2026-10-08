@@ -2,8 +2,8 @@
 //
 // Why usb-redir: QEMU on macOS has no virtual camera device, and the Mac's built-in camera is
 // not a USB device it could pass through. usb-redir lets a process outside QEMU *be* a USB
-// device. The guest kernel already has uvcvideo and Googlebook OS already ships a USB camera
-// HAL, so nothing inside the image changes: Android just sees a webcam being plugged in.
+// device. The guest kernel already has uvcvideo, so Android just sees a webcam being plugged
+// in; image/mica_camera_port.py swaps in AOSP's V4L2 camera provider to serve it.
 //
 // The usb-redir protocol (spice/usbredir, usbredirproto.h) is implemented directly for the
 // handful of packets a single bulk-streaming device needs, so no extra library is required.
@@ -37,9 +37,8 @@ typedef struct { uint8_t endpoint, status; uint16_t length; uint32_t stream_id; 
 static const struct { uint16_t w, h; } kFrames[] = {{1280,720},{1920,1080},{640,480}};
 enum { kFrameCount = 3, kInterval = 333333 /* 30 fps, 100 ns units */, kProbeLen = 34, kEpVideo = 0x81 };
 
-// USB vendor:product id (the Linux webcam gadget's). Googlebook OS's USB camera HAL only exposes
-// modules listed in /vendor/etc/camera/internal_usb_camera_info.txtpb; image/mica_camera_port.py
-// adds this id there. GBOS_WEBCAM_ID=vvvv:pppp overrides it.
+// USB vendor:product id (the Linux webcam gadget's). The V4L2 provider accepts any UVC device,
+// so the id only matters to anyone reading lsusb. GBOS_WEBCAM_ID=vvvv:pppp overrides it.
 static uint16_t gVendor = 0x1d6b, gProduct = 0x0102;
 static void LoadIds(void) {
   const char *e = getenv("GBOS_WEBCAM_ID"); unsigned v, p;

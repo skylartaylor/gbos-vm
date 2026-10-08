@@ -33,6 +33,53 @@ index c5417db..1461895 100644
  
        close_res_fd = true;
     }
+diff --git a/src/venus/vkr_common.h b/src/venus/vkr_common.h
+index 283794b..4e865d4 100644
+--- a/src/venus/vkr_common.h
++++ b/src/venus/vkr_common.h
+@@ -85,6 +85,42 @@
+ #define DRM_FORMAT_MOD_LINEAR (0)
+ #endif
+ 
++/* Memory planes of a format, as a linear DRM_FORMAT_MOD_LINEAR image has them. */
++static inline uint32_t
++vkr_format_plane_count(VkFormat format)
++{
++   switch (format) {
++   case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
++   case VK_FORMAT_G8_B8R8_2PLANE_422_UNORM:
++   case VK_FORMAT_G8_B8R8_2PLANE_444_UNORM:
++   case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16:
++   case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_422_UNORM_3PACK16:
++   case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_444_UNORM_3PACK16:
++   case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_420_UNORM_3PACK16:
++   case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_422_UNORM_3PACK16:
++   case VK_FORMAT_G12X4_B12X4R12X4_2PLANE_444_UNORM_3PACK16:
++   case VK_FORMAT_G16_B16R16_2PLANE_420_UNORM:
++   case VK_FORMAT_G16_B16R16_2PLANE_422_UNORM:
++   case VK_FORMAT_G16_B16R16_2PLANE_444_UNORM:
++      return 2;
++   case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
++   case VK_FORMAT_G8_B8_R8_3PLANE_422_UNORM:
++   case VK_FORMAT_G8_B8_R8_3PLANE_444_UNORM:
++   case VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_420_UNORM_3PACK16:
++   case VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_422_UNORM_3PACK16:
++   case VK_FORMAT_G10X6_B10X6_R10X6_3PLANE_444_UNORM_3PACK16:
++   case VK_FORMAT_G12X4_B12X4_R12X4_3PLANE_420_UNORM_3PACK16:
++   case VK_FORMAT_G12X4_B12X4_R12X4_3PLANE_422_UNORM_3PACK16:
++   case VK_FORMAT_G12X4_B12X4_R12X4_3PLANE_444_UNORM_3PACK16:
++   case VK_FORMAT_G16_B16_R16_3PLANE_420_UNORM:
++   case VK_FORMAT_G16_B16_R16_3PLANE_422_UNORM:
++   case VK_FORMAT_G16_B16_R16_3PLANE_444_UNORM:
++      return 3;
++   default:
++      return 1;
++   }
++}
++
+ struct vn_info_extension_table;
+ struct vkr_context;
+ struct vkr_ring;
 diff --git a/src/venus/vkr_context.c b/src/venus/vkr_context.c
 index 2ea5898..6038a61 100644
 --- a/src/venus/vkr_context.c
@@ -266,7 +313,7 @@ index 1c460fd..ad9589c 100644
        args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
        return;
 diff --git a/src/venus/vkr_image.c b/src/venus/vkr_image.c
-index c9d9964..0babef8 100644
+index c9d9964..abc682b 100644
 --- a/src/venus/vkr_image.c
 +++ b/src/venus/vkr_image.c
 @@ -17,8 +17,11 @@ vkr_image_fix_create_info(struct vkr_device *dev, VkImageCreateInfo *pCreateInfo
@@ -298,7 +345,7 @@ index c9d9964..0babef8 100644
     return VK_ERROR_FORMAT_NOT_SUPPORTED;
  }
  
-@@ -93,7 +105,41 @@ vkr_dispatch_vkCreateImage(struct vn_dispatch_context *dispatch,
+@@ -93,7 +105,55 @@ vkr_dispatch_vkCreateImage(struct vn_dispatch_context *dispatch,
      * situation because the app does not consider the memory external.
      */
  
@@ -307,29 +354,39 @@ index c9d9964..0babef8 100644
 +      vkr_find_struct(args->pCreateInfo,
 +                       VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT);
 +   const bool validate_layout = explicit_layout && dev->physical_device->is_dma_buf_emulated;
-+   if (validate_layout && explicit_layout->drmFormatModifierPlaneCount != 1) {
++   const uint32_t plane_count = vkr_format_plane_count(args->pCreateInfo->format);
++   if (validate_layout && explicit_layout->drmFormatModifierPlaneCount != plane_count) {
++      vkr_log("interop: format %u has %u planes, guest declared %u",
++              args->pCreateInfo->format, plane_count,
++              explicit_layout->drmFormatModifierPlaneCount);
 +      args->ret = VK_ERROR_FORMAT_NOT_SUPPORTED;
 +      return;
 +   }
 +   struct vkr_image *image = vkr_image_create(dispatch->data, args);
 +   if (!image)
 +      return;
-+   if (validate_layout) {
-+      const VkImageSubresource sub = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT };
++   for (uint32_t i = 0; validate_layout && i < plane_count; i++) {
++      const VkImageSubresource sub = {
++         .aspectMask = plane_count > 1 ? (VkImageAspectFlags)VK_IMAGE_ASPECT_PLANE_0_BIT << i
++                                       : VK_IMAGE_ASPECT_COLOR_BIT,
++      };
 +      VkSubresourceLayout actual;
 +      dev->proc_table.GetImageSubresourceLayout(dev->base.handle.device,
 +         image->base.handle.image, &sub, &actual);
-+      const VkSubresourceLayout *expected = &explicit_layout->pPlaneLayouts[0];
++      const VkSubresourceLayout *expected = &explicit_layout->pPlaneLayouts[i];
 +      /* The shared memory is host-only (the guest reaches pixels through
-+       * transfers), so the host pitch may exceed the guest-declared one. */
++       * transfers), so the host pitch may exceed the guest-declared one.  That
++       * only works for a single plane: further planes would then start at a
++       * different offset than the one the host-side copy of the buffer uses. */
 +      if (actual.rowPitch != expected->rowPitch)
-+         vkr_log("interop: host pitch %llu replaces guest pitch %llu for %ux%u",
++         vkr_log("interop: host pitch %llu replaces guest pitch %llu for %ux%u plane %u",
 +                 (unsigned long long)actual.rowPitch,
 +                 (unsigned long long)expected->rowPitch,
-+                 args->pCreateInfo->extent.width, args->pCreateInfo->extent.height);
-+      if (actual.offset != expected->offset || actual.rowPitch < expected->rowPitch) {
-+         vkr_log("interop: incompatible image pitch/offset: host %llu/%llu guest %llu/%llu",
-+                 (unsigned long long)actual.rowPitch, (unsigned long long)actual.offset,
++                 args->pCreateInfo->extent.width, args->pCreateInfo->extent.height, i);
++      if (actual.offset != expected->offset || actual.rowPitch < expected->rowPitch ||
++          (plane_count > 1 && actual.rowPitch != expected->rowPitch)) {
++         vkr_log("interop: incompatible image pitch/offset for plane %u: host %llu/%llu guest %llu/%llu",
++                 i, (unsigned long long)actual.rowPitch, (unsigned long long)actual.offset,
 +                 (unsigned long long)expected->rowPitch, (unsigned long long)expected->offset);
 +         dev->proc_table.DestroyImage(dev->base.handle.device, image->base.handle.image, NULL);
 +         free(image);
@@ -337,12 +394,16 @@ index c9d9964..0babef8 100644
 +         return;
 +      }
 +   }
++   if (validate_layout && plane_count > 1)
++      vkr_log("interop: %u-plane image format %u %ux%u on shared memory", plane_count,
++              args->pCreateInfo->format, args->pCreateInfo->extent.width,
++              args->pCreateInfo->extent.height);
 +   vkr_device_add_object(dispatch->data, dev, &image->base);
  }
  
  static void
 diff --git a/src/venus/vkr_physical_device.c b/src/venus/vkr_physical_device.c
-index 774705e..4c6b423 100644
+index 774705e..578fda9 100644
 --- a/src/venus/vkr_physical_device.c
 +++ b/src/venus/vkr_physical_device.c
 @@ -288,6 +288,8 @@ vkr_physical_device_init_extensions(struct vkr_physical_device *physical_dev)
@@ -375,7 +436,38 @@ index 774705e..4c6b423 100644
     if (physical_dev->KHR_external_fence_fd) {
        const VkPhysicalDeviceExternalFenceInfo fence_info = {
           .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_FENCE_INFO,
-@@ -705,6 +714,15 @@ vkr_dispatch_vkGetPhysicalDeviceFeatures2(
+@@ -396,16 +405,25 @@ vkr_physical_device_init_queue_family_properties(struct vkr_physical_device *phy
+ }
+ 
+ static void
+-vkr_physical_device_emulate_drm_props(VkDrmFormatModifierPropertiesListEXT *drm_props_list)
++vkr_physical_device_emulate_drm_props(VkDrmFormatModifierPropertiesListEXT *drm_props_list,
++                                      VkFormat format,
++                                      VkFormatFeatureFlags linear_features)
+ {
++    /* YUV formats (camera and video frames) are sampled only, through a YCbCr
++     * conversion; report what the host can do with them as linear images. */
++    const uint32_t plane_count = vkr_format_plane_count(format);
++    VkFormatFeatureFlags features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
++                                    VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
++                                    VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
++    if (plane_count > 1)
++       features = linear_features;
++
+     drm_props_list->drmFormatModifierCount = 1;
+     if (drm_props_list->pDrmFormatModifierProperties) {
+       drm_props_list->pDrmFormatModifierProperties[0] = (VkDrmFormatModifierPropertiesEXT){
+          .drmFormatModifier = DRM_FORMAT_MOD_LINEAR,
+-         .drmFormatModifierPlaneCount = 1,
+-         .drmFormatModifierTilingFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+-                                            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+-                                            VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
++         .drmFormatModifierPlaneCount = plane_count,
++         .drmFormatModifierTilingFeatures = features,
+       };
+     };
+ }
+@@ -705,6 +723,15 @@ vkr_dispatch_vkGetPhysicalDeviceFeatures2(
  
     vn_replace_vkGetPhysicalDeviceFeatures2_args_handle(args);
     vk->GetPhysicalDeviceFeatures2(args->physicalDevice, args->pFeatures);
@@ -391,7 +483,7 @@ index 774705e..4c6b423 100644
  }
  
  static void
-@@ -718,6 +736,15 @@ vkr_dispatch_vkGetPhysicalDeviceProperties2(
+@@ -718,6 +745,15 @@ vkr_dispatch_vkGetPhysicalDeviceProperties2(
  
     vn_replace_vkGetPhysicalDeviceProperties2_args_handle(args);
     vk->GetPhysicalDeviceProperties2(args->physicalDevice, args->pProperties);
@@ -407,6 +499,27 @@ index 774705e..4c6b423 100644
  }
  
  static void
+@@ -774,7 +810,9 @@ vkr_dispatch_vkGetPhysicalDeviceFormatProperties2(
+       VkDrmFormatModifierPropertiesListEXT* drm_props_list =
+          vkr_find_struct(args->pFormatProperties, VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT);
+       if (drm_props_list) {
+-         vkr_physical_device_emulate_drm_props(drm_props_list);
++         vkr_physical_device_emulate_drm_props(
++            drm_props_list, args->format,
++            args->pFormatProperties->formatProperties.linearTilingFeatures);
+       }
+    }
+ }
+@@ -859,7 +897,8 @@ vkr_dispatch_vkGetPhysicalDeviceImageFormatProperties2(
+       VkDrmFormatModifierPropertiesListEXT* drm_props_list =
+          vkr_find_struct(args->pImageFormatProperties, VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT);
+       if (drm_props_list) {
+-         vkr_physical_device_emulate_drm_props(drm_props_list);
++         vkr_physical_device_emulate_drm_props(drm_props_list, args->pImageFormatInfo->format,
++                                               VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+       }
+    }
+ }
 diff --git a/src/venus/vkr_physical_device.h b/src/venus/vkr_physical_device.h
 index d51c9f4..554db3e 100644
 --- a/src/venus/vkr_physical_device.h
@@ -468,7 +581,7 @@ index e8ded74..ef13676 100644
     /* newBufferWithBytesNoCopy requires a page-aligned pointer and length */
     const size_t page_size = getpagesize();
 diff --git a/src/vrend/vrend_renderer.c b/src/vrend/vrend_renderer.c
-index e6ae007..8035998 100644
+index e6ae007..0ed1a3d 100644
 --- a/src/vrend/vrend_renderer.c
 +++ b/src/vrend/vrend_renderer.c
 @@ -40,6 +40,8 @@
@@ -480,7 +593,23 @@ index e6ae007..8035998 100644
  
  #include "util/u_thread.h"
  #include "util/u_format.h"
-@@ -7635,6 +7637,16 @@ static enum virgl_resource_fd_type vrend_pipe_resource_export_fd(UNUSED struct p
+@@ -953,8 +955,13 @@ static inline bool vrend_format_can_scanout(enum virgl_formats format)
+ 
+    return gbm_device_is_format_supported(gbm->device, gbm_format, GBM_BO_USE_SCANOUT);
+ #else
+-   (void)format;
+-   return true;
++   /* Without gbm the host can only show RGB surfaces. Claiming YUV here makes
++    * guest minigbm keep the scanout flag on NV12, and minigbm will not emulate
++    * (as R8) a format that needs scanout, so no NV12 buffer for the camera or
++    * video decoders could be allocated at all. */
++   const struct util_format_description *desc =
++      util_format_description((enum pipe_format)format);
++   return !desc || desc->colorspace != UTIL_FORMAT_COLORSPACE_YUV;
+ #endif
+ }
+ 
+@@ -7635,6 +7642,16 @@ static enum virgl_resource_fd_type vrend_pipe_resource_export_fd(UNUSED struct p
                                                                   UNUSED int *fd,
                                                                   UNUSED void *data)
  {
@@ -497,7 +626,7 @@ index e6ae007..8035998 100644
  #if defined(HAVE_EPOXY_EGL_H) && defined(ENABLE_GBM_ALLOCATION)
     struct vrend_resource *res = (struct vrend_resource *)pres;
  
-@@ -8760,25 +8772,60 @@ static void vrend_resource_metal_init(UNUSED struct vrend_resource *gr, UNUSED u
+@@ -8760,25 +8777,66 @@ static void vrend_resource_metal_init(UNUSED struct vrend_resource *gr, UNUSED u
  {
  #if defined(ENABLE_METAL) && defined(HAVE_EPOXY_EGL_H)
     MTLTexture_id tex = NULL;
@@ -507,6 +636,11 @@ index e6ae007..8035998 100644
        return;
  
 -   if ((gr->base.bind & VIRGL_RES_BIND_SCANOUT) == 0)
++   /* Camera and video frames: guest minigbm keeps every YUV plane in one R8
++    * texture, and the guest compositor imports it into Vulkan as a multi-planar
++    * image.  The shared memory layout matches MoltenVK's linear NV12 layout. */
++   const bool share_yuv_planes = format == VIRGL_FORMAT_R8_UNORM &&
++      (gr->base.bind & VIRGL_BIND_SAMPLER_VIEW) && gr->base.height0 > 1;
 +   const bool share_linear = (gr->base.bind & VIRGL_BIND_SHARED) &&
 +      gr->base.target == PIPE_TEXTURE_2D && gr->base.array_size == 1 &&
 +      (format == VIRGL_FORMAT_R8G8B8A8_UNORM ||
@@ -516,7 +650,8 @@ index e6ae007..8035998 100644
 +       format == VIRGL_FORMAT_R16G16B16A16_FLOAT ||
 +       format == VIRGL_FORMAT_R16G16B16X16_FLOAT ||
 +       format == VIRGL_FORMAT_R10G10B10A2_UNORM ||
-+       format == VIRGL_FORMAT_R10G10B10X2_UNORM);
++       format == VIRGL_FORMAT_R10G10B10X2_UNORM ||
++       share_yuv_planes);
 +   if (!share_linear && (gr->base.bind & VIRGL_RES_BIND_SCANOUT) == 0)
        return;
  
@@ -560,7 +695,7 @@ index e6ae007..8035998 100644
  
     gr->storage_bits |= VREND_STORAGE_NATIVE_TEXTURE;
     gr->storage_bits |= VREND_STORAGE_EGL_IMAGE;
-@@ -8787,6 +8834,8 @@ static void vrend_resource_metal_init(UNUSED struct vrend_resource *gr, UNUSED u
+@@ -8787,6 +8845,8 @@ static void vrend_resource_metal_init(UNUSED struct vrend_resource *gr, UNUSED u
  fail:
     if (tex)
        virgl_metal_release_texture(tex);
@@ -569,7 +704,67 @@ index e6ae007..8035998 100644
     gr->metal_texture = NULL;
  #endif
  }
-@@ -9168,6 +9217,8 @@ void vrend_renderer_resource_destroy(struct vrend_resource *res)
+@@ -9101,6 +9161,51 @@ vrend_resource_create(const struct vrend_renderer_resource_create_args *args)
+    return gr;
+ }
+ 
++/*
++ * Guest minigbm asks for a real YUV resource when only the CPU touches the
++ * buffer (camera frames read by apps, decoder output).  Without gbm there is no
++ * YUV texture to back it, so store it the way minigbm lays it out in guest
++ * memory, which is also how minigbm emulates YUV itself on hosts like this one:
++ * one 8-bit (16-bit for P010) texture with the chroma rows below the luma rows.
++ */
++static void vrend_resource_pack_yuv(UNUSED struct vrend_resource *gr)
++{
++#if !defined(ENABLE_GBM_ALLOCATION)
++   struct pipe_resource *pr = &gr->base;
++   enum virgl_formats plane_format;
++   uint32_t width = pr->width0;
++
++   if (pr->target != PIPE_TEXTURE_2D || pr->depth0 != 1 || pr->array_size != 1 ||
++       pr->last_level != 0 || pr->nr_samples > 1)
++      return;
++
++   switch (pr->format) {
++   case VIRGL_FORMAT_NV12:
++   case VIRGL_FORMAT_NV21:
++      plane_format = VIRGL_FORMAT_R8_UNORM;
++      break;
++   case VIRGL_FORMAT_YV12:
++      /* Android YV12: luma rows aligned to 32 bytes, chroma rows to half that */
++      plane_format = VIRGL_FORMAT_R8_UNORM;
++      width = (width + 31) & ~31u;
++      break;
++   case VIRGL_FORMAT_P010:
++      plane_format = VIRGL_FORMAT_R16_UNORM;
++      break;
++   default:
++      return;
++   }
++
++   virgl_info("interop: YUV format %u %ux%u stored as one %ux%u plane texture\n",
++              pr->format, pr->width0, pr->height0, width,
++              pr->height0 + DIV_ROUND_UP(pr->height0, 2));
++   gr->packed_yuv_format = pr->format;
++   pr->format = plane_format;
++   pr->width0 = width;
++   pr->height0 = pr->height0 + DIV_ROUND_UP(pr->height0, 2);
++#endif
++}
++
+ struct pipe_resource *
+ vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args *args,
+                                void *image_oes)
+@@ -9115,6 +9220,7 @@ vrend_renderer_resource_create(const struct vrend_renderer_resource_create_args
+    if (args->target == PIPE_BUFFER) {
+       ret = vrend_resource_alloc_buffer(gr, args->flags);
+    } else {
++      vrend_resource_pack_yuv(gr);
+       const enum virgl_formats format = gr->base.format;
+       ret = vrend_resource_alloc_texture(gr, format, image_oes);
+    }
+@@ -9168,6 +9274,8 @@ void vrend_renderer_resource_destroy(struct vrend_resource *res)
  #ifdef ENABLE_METAL
     if (res->metal_texture)
        virgl_metal_release_texture(res->metal_texture);
@@ -578,8 +773,37 @@ index e6ae007..8035998 100644
  #endif
     free(res);
  }
+@@ -10248,10 +10356,28 @@ static int vrend_renderer_transfer_internal(struct vrend_context *ctx,
+ {
+    const struct iovec *iov;
+    int num_iovs;
++   struct vrend_transfer_info packed_info;
++   struct pipe_box packed_box;
+ 
+    if (!info->box)
+       return EINVAL;
+ 
++   if (res->packed_yuv_format) {
++      /* The guest describes a YUV transfer by its luma box only, and puts no
++       * offset on it for multi-planar formats.  Move the whole buffer instead:
++       * its layout in guest memory is exactly the packed texture. */
++      packed_box = (struct pipe_box){ .x = 0, .y = 0, .z = 0,
++                                      .width = res->base.width0,
++                                      .height = res->base.height0, .depth = 1 };
++      packed_info = *info;
++      packed_info.box = &packed_box;
++      packed_info.level = 0;
++      packed_info.offset = 0;
++      packed_info.stride = 0;
++      packed_info.layer_stride = 0;
++      info = &packed_info;
++   }
++
+    if (!vrend_hw_switch_context(ctx, true))
+       return EINVAL;
+ 
 diff --git a/src/vrend/vrend_renderer.h b/src/vrend/vrend_renderer.h
-index 814eb7e..63eedda 100644
+index 814eb7e..5dfc87c 100644
 --- a/src/vrend/vrend_renderer.h
 +++ b/src/vrend/vrend_renderer.h
 @@ -112,6 +112,8 @@ struct vrend_resource {
@@ -591,3 +815,13 @@ index 814eb7e..63eedda 100644
     /* Backed by a Metal texture whose MTLPixelFormat already matches the virgl
      * format (e.g. BGRA -> MTLPixelFormatBGRA8Unorm). Such resources are sampled
      * in the correct channel order, so the red/blue compensation swizzle that
+@@ -126,6 +128,9 @@ struct vrend_resource {
+    uint32_t blob_id;
+    struct list_head head;
+    bool is_imported;
++   /* Set when a YUV resource is stored as one R8/R16 texture holding every
++    * plane (see vrend_resource_pack_yuv); transfers then move the whole buffer. */
++   enum virgl_formats packed_yuv_format;
+ };
+ 
+ #define VIRGL_TEXTURE_NEED_SWIZZLE        (1 << 0)
