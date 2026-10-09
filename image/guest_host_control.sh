@@ -48,19 +48,37 @@ handle() {
       state="${args#* }"
       [ "$state" = "$args" ] && state="discharging"
       if [ -n "$level" ]; then
+        # Ensure battery is recognized as present so the unknown question-mark icon is replaced with the battery gauge
+        cmd battery set present 1
+        # Set level first so Android never evaluates 0% battery while offline
+        cmd battery set level "$level"
         if [ "$state" = "charging" ] || [ "$state" = "ac" ]; then
           cmd battery set ac 1
+          cmd battery set usb 0
           cmd battery set status 2
         elif [ "$state" = "full" ]; then
           cmd battery set ac 1
+          cmd battery set usb 0
           cmd battery set status 5
         else
-          cmd battery unplug
+          cmd battery set ac 0
+          cmd battery set usb 0
+          cmd battery set wireless 0
           cmd battery set status 3
         fi
-        cmd battery set level "$level"
+        settings put system status_bar_show_battery_percent 1 2>/dev/null
+        settings --user 0 put system status_bar_show_battery_percent 1 2>/dev/null
+        u=$(timeout 3 am get-current-user 2>/dev/null)
+        [ -n "$u" ] && settings --user "$u" put system status_bar_show_battery_percent 1 2>/dev/null
         echo "VM_CONTROL battery level=$level state=$state"
       fi ;;
+    VM_BATTERY_PERCENT\ [01])
+      val="${line#VM_BATTERY_PERCENT }"
+      settings put system status_bar_show_battery_percent "$val" 2>/dev/null
+      settings --user 0 put system status_bar_show_battery_percent "$val" 2>/dev/null
+      u=$(timeout 3 am get-current-user 2>/dev/null)
+      [ -n "$u" ] && settings --user "$u" put system status_bar_show_battery_percent "$val" 2>/dev/null
+      echo "VM_CONTROL battery_percent=$val" ;;
     VM_BATTERY_RESET)
       cmd battery reset
       echo "VM_CONTROL battery_reset" ;;

@@ -28,5 +28,6 @@ def send_battery(run_dir, level, state='discharging'):
 if __name__ == '__main__':
     assert (sys.argv[2] in VERBS or
             sys.argv[2].startswith('VM_DENSITY ') or
-            sys.argv[2].startswith('VM_BATTERY '))
+            sys.argv[2].startswith('VM_BATTERY ') or
+            sys.argv[2].startswith('VM_BATTERY_PERCENT '))
     send(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)

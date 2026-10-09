@@ -2,7 +2,7 @@
 """Read the partition table and Android v4 boot images out of the recovery image (read-only)."""
 import gzip, hashlib, json, pathlib, struct, subprocess, zlib
 R=pathlib.Path(__file__).resolve().parents[1]
-out=R/'artifacts/mica/normal';out.mkdir()
+out=R/'artifacts/mica/normal';out.mkdir(parents=True,exist_ok=True)
 u=lambda b,o:struct.unpack_from('<I',b,o)[0]
 align=lambda n,p:(n+p-1)//p*p
 manifest={}

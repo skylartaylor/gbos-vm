@@ -10,7 +10,7 @@ import hashlib,io,json,os,stat,struct,subprocess,sys,tarfile
 from cpio_tools import read,write
 from erofs_metadata import metadata
 from relocate_vendor import relocate
-R=Path(__file__).resolve().parents[1];O=R/'artifacts/mica'/sys.argv[1];assert O.parent==R/'artifacts/mica';O.mkdir()
+R=Path(__file__).resolve().parents[1];O=R/'artifacts/mica'/sys.argv[1];assert O.parent==R/'artifacts/mica';O.mkdir(parents=True,exist_ok=True)
 D=R/'experiments/erofs-utils/1.9.4/bin';E=R/'experiments/ext4-tools/e2fsprogs/1.47.4/sbin/debugfs'
 raw=R/'artifacts/mica-recovery.raw';off=5647630336;partsize=385949696
 payload=R/'artifacts/security-port-review/rust_nonsecure_payload.img'
