@@ -18,7 +18,7 @@ IMAGE_DIR="${GBOS_IMAGE_DIR:-$WORK/image}"
 WS="$WORK/ws"; rm -rf "$WS"
 mkdir -p "$WS/scripts" "$WS/artifacts/mica" "$WS/artifacts/graphics-port-review" "$WS/artifacts/cuttlefish-arm17" \
          "$WS/experiments/erofs-utils/1.9.4" "$WS/experiments/ext4-tools/e2fsprogs/1.47.4"
-cp "$ROOT"/image/* "$WS/scripts/"
+cp "$ROOT"/image/*.py "$ROOT"/image/*.sh "$WS/scripts/"
 ln -s "$WORK/googlebook/mica-recovery.raw" "$WS/artifacts/mica-recovery.raw"
 ln -s "$WORK/cuttlefish/security" "$WS/artifacts/security-port-review"
 ln -s "$WORK/cuttlefish/graphics/extracted" "$WS/artifacts/graphics-port-review/extracted"
@@ -46,8 +46,10 @@ say "User data area and extra kernel modules"
   && python3 scripts/add_mica_virtio_blk.py base-heap base-heap-vblk; } >>"$WORK/build-image.log" 2>&1 \
   || { tail -30 "$WORK/build-image.log"; die "image finishing failed"; }
 
-mkdir -p "$IMAGE_DIR"
+mkdir -p "$IMAGE_DIR"; chmod 700 "$IMAGE_DIR"
 mv artifacts/mica/base-heap-vblk/googlebook.raw artifacts/mica/base-heap-vblk/initrd.img "$IMAGE_DIR/"
+# Holds all guest data: keep it private.
+chmod 600 "$IMAGE_DIR/googlebook.raw"
 cp artifacts/mica/normal/kernel.Image "$IMAGE_DIR/kernel.Image"
 cp artifacts/mica/base-heap-vblk/*.json "$IMAGE_DIR/" 2>/dev/null || true
 cd "$WORK"; rm -rf "$WS"

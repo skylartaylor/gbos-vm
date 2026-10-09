@@ -131,28 +131,51 @@ index 81c694c..9727210 100644
           exts[ext_count++] = name;
        }
 diff --git a/src/venus/vkr_device_memory.c b/src/venus/vkr_device_memory.c
-index 1c460fd..ad9589c 100644
+index 1c460fd..6097153 100644
 --- a/src/venus/vkr_device_memory.c
 +++ b/src/venus/vkr_device_memory.c
-@@ -285,6 +285,30 @@ vkr_shm_free(struct vkr_shm *shm)
+@@ -11,6 +11,7 @@
+ 
+ #include "vkr_device_memory_gen.h"
+ #include <sys/mman.h>
++#include <sys/stat.h>
+ #include <unistd.h>
+ 
+ #include "util/anon_file.h"
+@@ -285,6 +286,45 @@ vkr_shm_free(struct vkr_shm *shm)
     free(shm);
  }
  
++/* Look the resource up, dup its fd and read its size under resource_mutex, so a
++ * concurrent DESTROY_RESOURCE cannot free it underneath us, and check the size
++ * against the real shm object before mapping it. */
 +static struct vkr_shm *
-+vkr_shm_import(const struct vkr_resource *res, uint64_t requested_size)
++vkr_shm_import(struct vkr_context *ctx, uint32_t res_id, uint64_t requested_size)
 +{
-+   if (res->shm_fd < 0 || !res->size || requested_size > res->size ||
-+       res->size % getpagesize())
-+      return NULL;
-+   struct vkr_shm *shm = calloc(1, sizeof(*shm));
-+   if (!shm)
-+      return NULL;
-+   shm->fd = os_dupfd_cloexec(res->shm_fd);
-+   if (shm->fd < 0) {
-+      free(shm);
++   int fd = -1;
++   size_t size = 0;
++   mtx_lock(&ctx->resource_mutex);
++   const struct hash_entry *entry = _mesa_hash_table_search(ctx->resource_table, &res_id);
++   const struct vkr_resource *res = entry ? entry->data : NULL;
++   if (res && res->fd_type == VIRGL_RESOURCE_FD_SHM && res->shm_fd >= 0) {
++      fd = os_dupfd_cloexec(res->shm_fd);
++      size = res->size;
++   }
++   mtx_unlock(&ctx->resource_mutex);
++   struct stat st;
++   if (fd < 0 || !size || requested_size > size || size % getpagesize() ||
++       fstat(fd, &st) || st.st_size < 0 || (uint64_t)st.st_size < size) {
++      if (fd >= 0)
++         close(fd);
 +      return NULL;
 +   }
-+   shm->size = res->size;
++   struct vkr_shm *shm = calloc(1, sizeof(*shm));
++   if (!shm) {
++      close(fd);
++      return NULL;
++   }
++   shm->fd = fd;
++   shm->size = size;
 +   shm->ptr = mmap(NULL, shm->size, PROT_READ | PROT_WRITE, MAP_SHARED, shm->fd, 0);
 +   if (shm->ptr == MAP_FAILED) {
 +      close(shm->fd);
@@ -165,20 +188,19 @@ index 1c460fd..ad9589c 100644
  static void
  vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
                                struct vn_command_vkAllocateMemory *args)
-@@ -304,16 +328,22 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -304,16 +344,21 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
     /* translate VkImportMemoryResourceInfoMESA into VkImportMemoryFdInfoKHR in place */
     VkImportMemoryFdInfoKHR local_import_info = { .fd = -1 };
     VkImportMemoryResourceInfoMESA *res_info = NULL;
-+   struct vkr_resource *shm_resource = NULL;
++   struct vkr_shm *imported_shm = NULL;
     VkBaseInStructure *prev_of_res_info = vkr_find_prev_struct(
        alloc_info, VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA);
     if (prev_of_res_info) {
        res_info = (VkImportMemoryResourceInfoMESA *)prev_of_res_info->pNext;
 -      if (!vkr_get_fd_info_from_resource_info(ctx, res_info, &local_import_info)) {
-+      struct vkr_resource *res = vkr_context_get_resource(ctx, res_info->resourceId);
-+      if (res && res->fd_type == VIRGL_RESOURCE_FD_SHM &&
-+          physical_dev->is_dma_buf_emulated) {
-+         shm_resource = res;
++      if (physical_dev->is_dma_buf_emulated &&
++          (imported_shm = vkr_shm_import(ctx, res_info->resourceId,
++                                         alloc_info->allocationSize))) {
 +         prev_of_res_info->pNext = res_info->pNext;
 +      } else if (!vkr_get_fd_info_from_resource_info(ctx, res_info, &local_import_info)) {
           args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
@@ -191,12 +213,12 @@ index 1c460fd..ad9589c 100644
     }
  
     VkExportMemoryAllocateInfo *export_info =
-@@ -350,11 +380,20 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -350,11 +395,20 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
      * and is otherwise left to fall through to a host that supports no fd handle
      * type at all.
      */
 -   const bool force_shm_import = physical_dev->is_dma_buf_emulated && !res_info &&
-+   const bool force_shm_import = shm_resource ||
++   const bool force_shm_import = imported_shm ||
 +                                (physical_dev->is_dma_buf_emulated && !res_info &&
                                   ((property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ||
 -                                  might_export);
@@ -205,7 +227,7 @@ index 1c460fd..ad9589c 100644
     if (force_shm_import) {
 +      /* Dedicated Android image imports become host-pointer imports, for which
 +       * Vulkan forbids a non-null dedicated image/buffer (VUID 02806). */
-+      if (shm_resource) {
++      if (imported_shm) {
 +         VkBaseInStructure *prev = vkr_find_prev_struct(
 +            alloc_info, VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO);
 +         if (prev)
@@ -214,31 +236,26 @@ index 1c460fd..ad9589c 100644
        if (export_info) {
           /* Strip export info since valid_fd_types can only be shm here.  The
            * guest asks for a dma_buf export when dma_buf is emulated, which
-@@ -368,9 +407,11 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -368,7 +422,7 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
        }
  
        /* Allocate shm and import it as host memory. */
 -      shm = vkr_shm_alloc(alloc_info->allocationSize);
-+      shm = shm_resource ? vkr_shm_import(shm_resource, alloc_info->allocationSize)
-+                         : vkr_shm_alloc(alloc_info->allocationSize);
++      shm = imported_shm ? imported_shm : vkr_shm_alloc(alloc_info->allocationSize);
        if (!shm) {
--         args->ret = VK_ERROR_OUT_OF_HOST_MEMORY;
-+         args->ret = shm_resource ? VK_ERROR_INVALID_EXTERNAL_HANDLE
-+                                  : VK_ERROR_OUT_OF_HOST_MEMORY;
+          args->ret = VK_ERROR_OUT_OF_HOST_MEMORY;
           return;
-       }
- 
-@@ -502,6 +543,9 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
+@@ -502,6 +556,9 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
     mem->shm = shm;
     mem->allocation_size = alloc_info->allocationSize;
     mem->memory_type_index = mem_type_index;
-+   if (shm_resource)
++   if (imported_shm)
 +      vkr_log("interop: imported shared resource %u (%zu bytes)",
-+              shm_resource->res_id, shm->size);
++              res_info->resourceId, shm->size);
  }
  
  static void
-@@ -564,6 +608,26 @@ vkr_dispatch_vkGetMemoryResourcePropertiesMESA(
+@@ -564,6 +621,26 @@ vkr_dispatch_vkGetMemoryResourcePropertiesMESA(
        return;
     }
  
@@ -265,8 +282,20 @@ index 1c460fd..ad9589c 100644
     if (res->fd_type != VIRGL_RESOURCE_FD_DMABUF) {
        args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
        return;
+@@ -653,6 +730,11 @@ vkr_device_memory_export_blob(struct vkr_device_memory *mem,
+    }
+ 
+    if (mem->shm) {
++      /* blob_size comes from the guest: never export more than the shm holds. */
++      if (!blob_size || blob_size > mem->shm->size) {
++         vkr_log("mem shm size %zu < blob_size %" PRIu64, mem->shm->size, blob_size);
++         return false;
++      }
+       mem->exported = true;
+       *out_blob = (struct virgl_context_blob){
+          .type = VIRGL_RESOURCE_FD_SHM,
 diff --git a/src/venus/vkr_image.c b/src/venus/vkr_image.c
-index c9d9964..0babef8 100644
+index c9d9964..b85f82b 100644
 --- a/src/venus/vkr_image.c
 +++ b/src/venus/vkr_image.c
 @@ -17,8 +17,11 @@ vkr_image_fix_create_info(struct vkr_device *dev, VkImageCreateInfo *pCreateInfo
@@ -316,7 +345,7 @@ index c9d9964..0babef8 100644
 +      return;
 +   if (validate_layout) {
 +      const VkImageSubresource sub = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT };
-+      VkSubresourceLayout actual;
++      VkSubresourceLayout actual = { 0 };
 +      dev->proc_table.GetImageSubresourceLayout(dev->base.handle.device,
 +         image->base.handle.image, &sub, &actual);
 +      const VkSubresourceLayout *expected = &explicit_layout->pPlaneLayouts[0];

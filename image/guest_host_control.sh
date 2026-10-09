@@ -1,10 +1,27 @@
 #!/system/bin/sh
 # Fixed-verb control channel from the host over this VM's private serial
 # console. Runs as shell; anything not listed below is ignored.
+# VM_TOKEN carries a secret: don't echo it.
+stty -echo 2>/dev/null
+# Per boot token for the pointer helper. The host sends it once per boot, so keep it across
+# service restarts and drop a stale one on the first start of a boot (kernel boot id).
+TOKEN_FILE=/data/local/tmp/vm-input.token
+BOOT_MARK=/data/local/tmp/vm-input.bootid
+boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+if [ -z "$boot_id" ] || [ "$(cat "$BOOT_MARK" 2>/dev/null)" != "$boot_id" ]; then
+  rm -f "$TOKEN_FILE"
+  echo "$boot_id" >"$BOOT_MARK" 2>/dev/null || true
+fi
 echo VM_CONTROL_READY
 handle() {
   case "$line" in
     VM_POWEROFF) echo VM_CONTROL poweroff; setprop sys.powerctl shutdown ;;
+    VM_TOKEN\ *)
+      t=${line#VM_TOKEN }; tok=${t%% *}; addr=${t#* }
+      case "$tok" in *[!0-9a-f]*) return ;; esac
+      [ ${#tok} -eq 32 ] || return
+      case "$addr" in 10.0.2.2|10.0.2.100) ;; *) return ;; esac
+      (umask 077; printf '%s\n%s\n' "$tok" "$addr" >"$TOKEN_FILE.new" && mv -f "$TOKEN_FILE.new" "$TOKEN_FILE") && echo "VM_CONTROL token set" ;;
     VM_PASTE\ *)
       printf %s "${line#VM_PASTE }" | base64 -d 2>/dev/null | while IFS= read -r t || [ -n "$t" ]; do
         [ -n "$t" ] && timeout 20 input text "$t"

@@ -29,5 +29,5 @@ int main(int argc,char **argv) {
   if(old)old->data|=bits;else {avtab_datum_t val={.data=bits};if(avtab_insert(&p.te_avtab,&key,&val))return 8;}
  }
  f.fp=fopen(argv[2],"wb");if(!f.fp)return 9;
- if(policydb_write(&p,&f))return 10;fclose(f.fp);policydb_destroy(&p);return 0;
+ if(policydb_write(&p,&f)||fclose(f.fp))return 10;policydb_destroy(&p);return 0;
 }

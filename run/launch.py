@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Start the Googlebook desktop with its viewer window.  launch.py WORK [--fullscreen] [--display WxH]
 Closing the viewer shuts Android down cleanly. Data in WORK/image/googlebook.raw persists."""
-import datetime, json, os, signal, subprocess, sys, time
+import datetime, json, os, re, signal, subprocess, sys, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -45,9 +45,11 @@ def main():
     fullscreen = '--fullscreen' in sys.argv or setting('StartFullscreen', '0') == '1'
     options = ['--memory', setting('MemoryMiB', '4096'), '--cpus', setting('CPUs', '6')]
     if setting('Networking', '1') == '0': options.append('--offline')
+    elif setting('IsolateNetwork', '0') == '1': options.append('--isolated')
     if setting('Audio', '1') == '0': options.append('--no-audio')
     if setting('Bluetooth', '1') == '0': options.append('--no-bluetooth')
-    density = round(240 * width / 1920)
+    # Scale by the tighter dimension against 1920x1200 at 240 dpi.
+    density = round(240 * min(width / 1920, height / 1200))
     name = 'desktop-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     run_dir = work / 'logs' / name
     children = []
@@ -72,7 +74,7 @@ def main():
             while vm.poll() is None and viewer.poll() is None:
                 time.sleep(.5)
                 # Once Android is up, match the display density to the resolution (persists).
-                if not configured and time.monotonic() - start > 20 and serial.exists() and b'VM_BOOT_COMPLETED' in serial.read_bytes():
+                if not configured and time.monotonic() - start > 20 and serial.exists() and re.search(rb'(?m)^VM_BOOT_COMPLETED', serial.read_bytes()):
                     configured = True
                     try: time.sleep(8); vm_control.send(run_dir, f'VM_DENSITY {density}')
                     except OSError: pass

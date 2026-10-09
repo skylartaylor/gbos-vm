@@ -68,7 +68,7 @@ if '--crash-diagnostics' in sys.argv:
  b,label,mode=files[n]
  start=b.index(b'-v threadtime ')+len(b'-v threadtime ')
  end=b.index(b'"',start)
- b=b[:start]+b'*:S DEBUG:F chromium:V ActivityManager:E AndroidRuntime:E Watchdog:E lmkd:I libc:F am_crash:I am_kill:I am_anr:I'+b[end:]
+ b=b[:start]+b'*:S DEBUG:F chromium:F ActivityManager:E AndroidRuntime:E Watchdog:E lmkd:I libc:F am_crash:I am_kill:I am_anr:I'+b[end:]
  files[n]=(b,label,mode)
  (O/'crash-diagnostics.json').write_text(json.dumps({'purpose':'capture native debuggerd backtraces and Chromium fatal checks','security_policy':'unchanged'})+'\n')
 for n in ['keymint','secureclock','sharedsecret']:

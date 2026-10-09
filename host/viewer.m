@@ -7,6 +7,7 @@
 #import <netinet/in.h>
 #import <netinet/tcp.h>
 #import <arpa/inet.h>
+#import <CommonCrypto/CommonHMAC.h>
 
 static unsigned short scan[128] = {
  [0]=0x1e,[1]=0x1f,[2]=0x20,[3]=0x21,[4]=0x23,[5]=0x22,[6]=0x2c,[7]=0x2d,[8]=0x2e,[9]=0x2f,[11]=0x30,
@@ -160,12 +161,11 @@ static unsigned short scan[128] = {
 @property(nonatomic,strong) dispatch_source_t acceptSource;
 @property(nonatomic,strong) dispatch_source_t readSource;
 @property(nonatomic) int ctlFd;
-@property(nonatomic,strong) NSMutableData *ctlBuffer;
-@property(nonatomic) NSInteger sentClipCount;
+@property(nonatomic,strong) NSMutableArray *ctlPending; // read sources of connections still proving the token, oldest first
 @end
 @implementation App
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
- [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":@4096,@"CPUs":@6,@"Networking":@YES,@"Audio":@YES,@"Bluetooth":@YES}];
+ [[NSUserDefaults standardUserDefaults] registerDefaults:@{@"PointerMode":@2,@"Resolution":@"native",@"StartFullscreen":@NO,@"MemoryMiB":@4096,@"CPUs":@6,@"Networking":@YES,@"IsolateNetwork":@NO,@"GuestClipboardToMac":@NO,@"Audio":@YES,@"Bluetooth":@YES}];
  self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1280,800) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
  self.window.title=@"Googlebook VM";self.window.subtitle=@"Connecting…";self.window.delegate=self;self.window.acceptsMouseMovedEvents=YES;self.window.collectionBehavior=NSWindowCollectionBehaviorFullScreenPrimary;
  self.view=[[VMView alloc] initWithFrame:self.window.contentView.bounds device:MTLCreateSystemDefaultDevice()];self.view.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;self.view.preferredFramesPerSecond=120;self.view.clearColor=MTLClearColorMake(0,0,0,1);
@@ -231,14 +231,17 @@ static unsigned short scan[128] = {
   for(id m in modes){CGDisplayModeRef mode=(__bridge CGDisplayModeRef)m;
    if(CGDisplayModeGetIOFlags(mode)&0x02000000 /* kDisplayModeNativeFlag */){w=CGDisplayModeGetPixelWidth(mode);h=CGDisplayModeGetPixelHeight(mode);break;}}
   res=[NSString stringWithFormat:@"%.0fx%.0f",w,MIN(h,round(w/1.6))];}
- self.guestDensity=(NSInteger)round(240.0*[res integerValue]/1920.0);
+ // Scale by the tighter dimension against 1920x1200 at 240 dpi, so ultrawides stay readable.
+ {NSArray *wh=[res componentsSeparatedByString:@"x"];double rw=[wh.firstObject doubleValue],rh=[wh.lastObject doubleValue];
+  self.guestDensity=(NSInteger)round(240.0*MIN(rw/1920.0,rh/1200.0));}
  NSDateFormatter *f=[NSDateFormatter new];f.dateFormat=@"yyyyMMdd-HHmmss";NSString *name=[@"desktop-" stringByAppendingString:[f stringFromDate:[NSDate date]]];
  self.runDir=[[work stringByAppendingPathComponent:@"logs"] stringByAppendingPathComponent:name];
  NSMutableArray *args=[@[runner,work,name,@"--display",res,@"--memory",[[d objectForKey:@"MemoryMiB"] description],@"--cpus",[[d objectForKey:@"CPUs"] description]] mutableCopy];
  if(![d boolForKey:@"Networking"])[args addObject:@"--offline"];
+ else if([d boolForKey:@"IsolateNetwork"])[args addObject:@"--isolated"];
  if(![d boolForKey:@"Audio"])[args addObject:@"--no-audio"];
  if(![d boolForKey:@"Bluetooth"])[args addObject:@"--no-bluetooth"];
- NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];t.arguments=args;
+ NSTask *t=[NSTask new];t.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];[args insertObject:@"-I" atIndex:0];t.arguments=args;
  t.standardOutput=[NSFileHandle fileHandleWithNullDevice];t.standardError=[NSFileHandle fileHandleWithNullDevice];
  __weak App *weak=self;
  t.terminationHandler=^(NSTask *x){dispatch_async(dispatch_get_main_queue(),^{
@@ -270,7 +273,7 @@ static unsigned short scan[128] = {
    self.densitySent=YES;
    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(8*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
     NSTask *c=[NSTask new];c.executableURL=[NSURL fileURLWithPath:@"/usr/bin/python3"];
-    c.arguments=@[[NSBundle.mainBundle pathForResource:@"vm_control" ofType:@"py"],self.runDir,[NSString stringWithFormat:@"VM_DENSITY %ld",(long)self.guestDensity]];
+    c.arguments=@[@"-I",[NSBundle.mainBundle pathForResource:@"vm_control" ofType:@"py"],self.runDir,[NSString stringWithFormat:@"VM_DENSITY %ld",(long)self.guestDensity]];
     [c launchAndReturnError:nil];});
   }
  }];
@@ -281,16 +284,16 @@ static unsigned short scan[128] = {
  self.quitting=YES;self.window.subtitle=self.restarting?@"Restarting: shutting Android down…":@"Shutting Android down…";[self.view releaseCapture];[self.vmTask terminate];
  return NSTerminateLater;
 }
-// Control link to the helper inside Android (scripts/guest_input): it connects
-// to this loopback port through the VM's NAT and takes pointer/clipboard lines.
+// Control link to the helper in Android (guest/input). Any guest app can reach this port, so
+// both ends prove the token with an HMAC exchange (see Input.java) first.
 - (void)ctlSend:(NSString *)line {
  if(self.ctlFd<0)return;
  NSData *d=[[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
  if(write(self.ctlFd,d.bytes,d.length)!=(ssize_t)d.length)[self ctlClose];
 }
 - (void)ctlClose {
- if(self.readSource){dispatch_source_cancel(self.readSource);self.readSource=nil;}
- if(self.ctlFd>=0){close(self.ctlFd);self.ctlFd=-1;}
+ if(self.readSource){dispatch_source_cancel(self.readSource);self.readSource=nil;} // the cancel handler closes the fd
+ self.ctlFd=-1;
  self.view.absolute=NO;self.view.guestCursor=NO;[self.view setHostCursorHidden:NO];fprintf(stderr,"CONTROL disconnected\n");[self updateSubtitle];
 }
 - (void)updateSubtitle {
@@ -345,69 +348,102 @@ static unsigned short scan[128] = {
   NSGridView *grid=[NSGridView gridViewWithViews:@[
    @[label(@"Pointer:"),self.pointerPopup],
    @[[NSGridCell emptyContentView],hint],
+   @[label(@"Clipboard:"),[self checkbox:@"GuestClipboardToMac" title:@"Copy text copied in Android to the Mac clipboard"]],
    @[[NSGridCell emptyContentView],note],
    @[[NSGridCell emptyContentView],[NSButton buttonWithTitle:@"Restart VM Now" target:self action:@selector(restartVM:)]],
-   @[label(@"Resolution:"),[self popup:@"Resolution" titles:@[@"Match this Mac's display",@"1920 × 1200",@"2560 × 1600",@"3024 × 1890",@"3456 × 2160"] values:@[@"native",@"1920x1200",@"2560x1600",@"3024x1890",@"3456x2160"]]],
+   @[label(@"Resolution:"),[self popup:@"Resolution" titles:@[@"Match this Mac's display",@"1920 × 1080 (16:9)",@"2560 × 1440 (16:9)",@"3840 × 2160 (16:9, 4K)",@"3440 × 1440 (21:9 ultrawide)",@"1920 × 1200 (16:10)",@"2560 × 1600 (16:10)",@"3024 × 1890 (16:10)",@"3456 × 2160 (16:10)"] values:@[@"native",@"1920x1080",@"2560x1440",@"3840x2160",@"3440x1440",@"1920x1200",@"2560x1600",@"3024x1890",@"3456x2160"]]],
    @[[NSGridCell emptyContentView],[self checkbox:@"StartFullscreen" title:@"Start in full screen"]],
    @[label(@"Memory:"),[self popup:@"MemoryMiB" titles:@[@"4 GB",@"6 GB",@"8 GB"] values:@[@4096,@6144,@8192]]],
    @[label(@"Processor cores:"),[self popup:@"CPUs" titles:@[@"4",@"6",@"8"] values:@[@4,@6,@8]]],
    @[[NSGridCell emptyContentView],[self checkbox:@"Networking" title:@"Networking (also needed for the pointer and clipboard link)"]],
+   @[[NSGridCell emptyContentView],[self checkbox:@"IsolateNetwork" title:@"Isolate from this Mac: no internet or Mac services, pointer link only"]],
    @[[NSGridCell emptyContentView],[self checkbox:@"Audio" title:@"Audio output"]],
    @[[NSGridCell emptyContentView],[self checkbox:@"Bluetooth" title:@"Bluetooth (virtual radio; needs the Android emulator installed)"]]]];
   grid.rowSpacing=8;grid.columnSpacing=10;grid.translatesAutoresizingMaskIntoConstraints=NO;
   [grid columnAtIndex:0].xPlacement=NSGridCellPlacementTrailing;
-  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,520,370) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
+  NSWindow *w=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,560,430) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
   w.title=@"Googlebook Settings";w.releasedWhenClosed=NO;[w.contentView addSubview:grid];
   [NSLayoutConstraint activateConstraints:@[[grid.topAnchor constraintEqualToAnchor:w.contentView.topAnchor constant:20],[grid.leadingAnchor constraintEqualToAnchor:w.contentView.leadingAnchor constant:20],[grid.trailingAnchor constraintLessThanOrEqualToAnchor:w.contentView.trailingAnchor constant:-20],[grid.bottomAnchor constraintLessThanOrEqualToAnchor:w.contentView.bottomAnchor constant:-20]]];
   [w center];self.settingsWindow=w;
  }
  [self syncSettingsWindow];[self.view releaseCapture];[self.settingsWindow makeKeyAndOrderFront:nil];
 }
-- (void)pushClipboard {
- if(self.ctlFd<0)return;NSPasteboard *pb=[NSPasteboard generalPasteboard];
- if(pb.changeCount==self.sentClipCount)return;self.sentClipCount=pb.changeCount;
- NSString *t=[pb stringForType:NSPasteboardTypeString];if(!t.length||t.length>100000)return;
- [self ctlSend:[@"C " stringByAppendingString:[[t dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0]]];
+- (BOOL)pushClipboard {
+ if(self.ctlFd<0)return NO;
+ NSString *t=[[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];if(!t.length||t.length>100000)return NO;
+ [self ctlSend:[@"C " stringByAppendingString:[[t dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0]]];return self.ctlFd>=0;
 }
 - (void)ctlLine:(NSString *)line {
  if([line hasPrefix:@"m "]){self.view.guestCursor=[line isEqualToString:@"m tablet"]&&[self pointerMode]==0;if(!self.view.guestCursor||!self.view.inside)[self.view setHostCursorHidden:NO];else [self.view setHostCursorHidden:YES];fprintf(stderr,"CONTROL pointer mode %s\n",line.UTF8String+2);[self updateSubtitle];return;}
- if([line hasPrefix:@"c "]){
+ // Guest to Mac clipboard is opt in (Settings): a guest app could plant text to paste into Terminal.
+ if([line hasPrefix:@"c "]&&[[NSUserDefaults standardUserDefaults] boolForKey:@"GuestClipboardToMac"]){
   NSData *d=[[NSData alloc] initWithBase64EncodedString:[line substringFromIndex:2] options:0];NSString *t=d?[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]:nil;
-  if(t.length){NSPasteboard *pb=[NSPasteboard generalPasteboard];[pb clearContents];[pb setString:t forType:NSPasteboardTypeString];self.sentClipCount=pb.changeCount;}
+  if(t.length){NSPasteboard *pb=[NSPasteboard generalPasteboard];[pb clearContents];[pb setString:t forType:NSPasteboardTypeString];}
  }
 }
+- (NSString *)ctlHmac:(NSString *)msg {
+ const char *tk=getenv("VM_INPUT_TOKEN");NSData *m=[msg dataUsingEncoding:NSUTF8StringEncoding];unsigned char mac[CC_SHA256_DIGEST_LENGTH];
+ CCHmac(kCCHmacAlgSHA256,tk,strlen(tk),m.bytes,m.length,mac);
+ NSMutableString *h=[NSMutableString stringWithCapacity:2*sizeof mac];for(size_t i=0;i<sizeof mac;i++)[h appendFormat:@"%02x",mac[i]];return h;
+}
+- (void)ctlDrop:(dispatch_source_t)rs {
+ if(rs==self.readSource){[self ctlClose];return;}
+ [self.ctlPending removeObject:rs];dispatch_source_cancel(rs);
+}
 - (void)startControlServer {
- self.ctlFd=-1;signal(SIGPIPE,SIG_IGN);
+ self.ctlFd=-1;self.ctlPending=[NSMutableArray array];signal(SIGPIPE,SIG_IGN);
  const char *pe=getenv("VM_INPUT_PORT");int port=pe?atoi(pe):27183;if(port<=0)return;
  int ls=socket(AF_INET,SOCK_STREAM,0),one=1;setsockopt(ls,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one);
  struct sockaddr_in a={.sin_family=AF_INET,.sin_port=htons(port),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
- if(bind(ls,(struct sockaddr *)&a,sizeof a)||listen(ls,1)){fprintf(stderr,"CONTROL listen failed on %d\n",port);close(ls);return;}
+ if(bind(ls,(struct sockaddr *)&a,sizeof a)||listen(ls,1)){fprintf(stderr,"CONTROL listen failed on %d\n",port);close(ls);self.window.subtitle=[NSString stringWithFormat:@"Pointer link unavailable: port %d is in use by another program",port];return;}
  self.acceptSource=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,ls,0,dispatch_get_main_queue());
  dispatch_source_set_event_handler(self.acceptSource,^{
   int fd=accept(ls,NULL,NULL);if(fd<0)return;
-  if(self.ctlFd>=0)[self ctlClose];
+  // No token, no link. Drop the oldest waiting peer so held open sockets can't lock the helper out.
+  const char *tk=getenv("VM_INPUT_TOKEN");if(!tk||!*tk){close(fd);return;}
+  while(self.ctlPending.count>=8)[self ctlDrop:self.ctlPending.firstObject];
   int yes=1;setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&yes,sizeof yes);
-  self.ctlFd=fd;self.ctlBuffer=[NSMutableData data];[self applyPointerMode];self.sentClipCount=-1;
-  fprintf(stderr,"CONTROL connected\n");[self updateSubtitle];
-  const char *tk=getenv("VM_INPUT_TOKEN");if(tk&&*tk)[self ctlSend:[NSString stringWithFormat:@"A %s",tk]];
-  [self sendGeometry];[self pushClipboard];
-  dispatch_source_t rs=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,fd,0,dispatch_get_main_queue());self.readSource=rs;
+  unsigned char nb[16];arc4random_buf(nb,sizeof nb);
+  NSMutableString *hostNonce=[NSMutableString string];for(size_t i=0;i<sizeof nb;i++)[hostNonce appendFormat:@"%02x",nb[i]];
+  NSData *hello=[[NSString stringWithFormat:@"N %@\n",hostNonce] dataUsingEncoding:NSUTF8StringEncoding];
+  if(write(fd,hello.bytes,hello.length)!=(ssize_t)hello.length){close(fd);return;}
+  dispatch_source_t rs=dispatch_source_create(DISPATCH_SOURCE_TYPE_READ,fd,0,dispatch_get_main_queue());
+  dispatch_source_set_cancel_handler(rs,^{close(fd);});
+  [self.ctlPending addObject:rs];
+  NSMutableData *buffer=[NSMutableData data];__block BOOL authed=NO;
   dispatch_source_set_event_handler(rs,^{
-   char buf[65536];ssize_t n=read(fd,buf,sizeof buf);if(n<=0){if(self.ctlFd==fd)[self ctlClose];return;}
-   [self.ctlBuffer appendBytes:buf length:n];
-   while(1){const char *b=self.ctlBuffer.bytes;const char *nl=memchr(b,'\n',self.ctlBuffer.length);if(!nl)break;
+   char buf[65536];ssize_t n=read(fd,buf,sizeof buf);if(n<=0){[self ctlDrop:rs];return;}
+   [buffer appendBytes:buf length:n];
+   while(1){const char *b=buffer.bytes;const char *nl=memchr(b,'\n',buffer.length);if(!nl)break;
     NSString *line=[[NSString alloc] initWithBytes:b length:nl-b encoding:NSUTF8StringEncoding];
-    [self.ctlBuffer replaceBytesInRange:NSMakeRange(0,nl-b+1) withBytes:NULL length:0];if(line)[self ctlLine:line];}
+    [buffer replaceBytesInRange:NSMakeRange(0,nl-b+1) withBytes:NULL length:0];
+    if(authed){if(line)[self ctlLine:line];continue;}
+    // Expect "a <guest-nonce> <HMAC(token, gbos-guest:<host-nonce>:<guest-nonce>)>".
+    NSArray<NSString *> *p=[line componentsSeparatedByString:@" "];
+    NSData *got=p.count==3&&[p[0] isEqualToString:@"a"]&&p[1].length==32&&[p[1] rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location==NSNotFound?[p[2] dataUsingEncoding:NSUTF8StringEncoding]:nil;
+    NSData *want=got?[[self ctlHmac:[NSString stringWithFormat:@"gbos-guest:%@:%@",hostNonce,p[1]]] dataUsingEncoding:NSUTF8StringEncoding]:nil;
+    if(!got||got.length!=want.length||timingsafe_bcmp(got.bytes,want.bytes,want.length)){fprintf(stderr,"CONTROL rejected peer: bad token\n");[self ctlDrop:rs];return;}
+    authed=YES;[self.ctlPending removeObject:rs];
+    if(self.ctlFd>=0)[self ctlClose];
+    self.ctlFd=fd;self.readSource=rs;
+    [self ctlSend:[@"A " stringByAppendingString:[self ctlHmac:[NSString stringWithFormat:@"gbos-host:%@:%@",p[1],hostNonce]]]];
+    [self applyPointerMode];
+    fprintf(stderr,"CONTROL connected\n");[self updateSubtitle];
+    [self sendGeometry];
+   }
+   // Cap the line length, much lower before the token is proven.
+   if(buffer.length>(authed?(2u<<20):512u)){fprintf(stderr,"CONTROL dropped peer: line too long\n");[self ctlDrop:rs];}
   });
   dispatch_resume(rs);
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+   if([self.ctlPending containsObject:rs]){fprintf(stderr,"CONTROL dropped peer: no token\n");[self ctlDrop:rs];}
+  });
  });
  dispatch_resume(self.acceptSource);fprintf(stderr,"CONTROL listening on 127.0.0.1:%d\n",port);
 }
-- (void)applicationDidBecomeActive:(NSNotification *)n{[self pushClipboard];}
-// Paste the Mac clipboard's text into the guest as typed input, through the
-// VM's fixed-verb control channel. Nothing is ever copied out of the guest.
+// Command V is the only time Mac clipboard text goes to the guest.
 - (void)pasteIntoGuest:(id)sender{
- if(self.view.absolute){[self pushClipboard];[self ctlSend:@"K 279"];return;}
+ if(self.ctlFd>=0){if([self pushClipboard])[self ctlSend:@"K 279"];else NSBeep();return;}
  NSBeep(); // no helper link yet, so there is nowhere to paste to
 }
 - (void)windowDidResignKey:(NSNotification *)n{[self.view releaseCapture];}

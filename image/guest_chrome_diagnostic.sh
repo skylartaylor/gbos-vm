@@ -1,4 +1,6 @@
 #!/system/bin/sh
+# Don't read the host control console.
+exec </dev/null
 # Diagnostic: dump Vulkan capabilities, then start Chrome once
 # after boot and print its GPU-process log lines to the serial console.
 sleep 50

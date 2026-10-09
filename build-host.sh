@@ -16,9 +16,13 @@ fi
 mkdir -p "$WORK/src" "$WORK/build" "$WORK/host" "$WORK/pkgconfig"
 
 say "Python build environment (meson, ninja)"
-if [ ! -x "$WORK/env/bin/meson" ]; then
+# Rebuild when the pinned list changes.
+REQ_HASH="$(shasum -a 256 "$ROOT/host/requirements-build.txt" | cut -d' ' -f1)"
+if [ ! -x "$WORK/env/bin/meson" ] || [ "$(cat "$WORK/env/.requirements-sha256" 2>/dev/null || true)" != "$REQ_HASH" ]; then
+  rm -rf "$WORK/env"
   python3 -m venv "$WORK/env"
-  "$WORK/env/bin/pip" -q install meson==1.12.1 ninja==1.13.2 mako pyyaml packaging
+  "$WORK/env/bin/pip" -q install --require-hashes -r "$ROOT/host/requirements-build.txt"
+  echo "$REQ_HASH" > "$WORK/env/.requirements-sha256"
 fi
 export PATH="$WORK/env/bin:$PATH" CCACHE_DISABLE=1
 

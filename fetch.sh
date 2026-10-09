@@ -11,6 +11,11 @@ need brew "https://brew.sh"
 for f in erofs-utils e2fsprogs lz4 pkgconf; do
   brew list --formula "$f" >/dev/null 2>&1 || brew install -q "$f"
 done
+# Homebrew can't pin versions: note when these differ from the tested ones.
+for fv in erofs-utils:1.9.4 e2fsprogs:1.47.4 lz4:1.10.0; do
+  have="$(brew list --versions "${fv%%:*}" 2>/dev/null | awk '{print $2}' || true)"
+  [ "${have%%_*}" = "${fv#*:}" ] || echo "note: ${fv%%:*} is ${have:-missing}; tested with ${fv#*:}"
+done
 
 say "UTM 5.0.6 beta (QEMU, MoltenVK, ANGLE, SPICE)"
 if [ ! -d "$UTM_BETA_APP" ]; then
@@ -37,9 +42,14 @@ say "Cuttlefish virtual-device image (Android CI build $CUTTLEFISH_BUILD)"
 if [ ! -f "$DOWNLOADS/$CUTTLEFISH_ZIP" ]; then
   # The public CI page hands out a short-lived storage URL for the artifact.
   url="$(python3 - <<PY
-import json,re,urllib.request
+import json,re,sys,urllib.parse,urllib.request
 html=urllib.request.urlopen('https://ci.android.com/builds/submitted/$CUTTLEFISH_BUILD/aosp_cf_arm64_only_phone-userdebug/latest/$CUTTLEFISH_ZIP',timeout=30).read(1<<20).decode()
-print(json.loads(re.search(r'var JSVariables = (\{.*?\});',html).group(1))['artifactUrl'])
+url=json.loads(re.search(r'var JSVariables = (\{.*?\});',html).group(1))['artifactUrl']
+# Only accept a Google host (the download is checksum pinned too).
+u=urllib.parse.urlsplit(url); host=(u.hostname or '').lower()
+if u.scheme!='https' or not any(host==d or host.endswith('.'+d) for d in ('googleapis.com','googleusercontent.com','google.com','android.com')):
+    sys.exit('unexpected Cuttlefish artifact URL: '+url)
+print(url)
 PY
 )"
   fetch_big "$url" "$DOWNLOADS/$CUTTLEFISH_ZIP" "$CUTTLEFISH_SHA256"

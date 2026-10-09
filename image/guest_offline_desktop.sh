@@ -1,4 +1,6 @@
 #!/system/bin/sh
+# Don't read the host control console.
+exec </dev/null
 # First-boot provisioning: mark the device set up and go straight to the desktop.
 # Does not touch accounts, credentials, networking, device-owner or FRP state.
 echo "VM_BOOT_COMPLETED uptime=$(cut -d' ' -f1 /proc/uptime)"
