@@ -22,6 +22,6 @@ e['lib/modules/modules.load']=(stat.S_IFREG|0o644,('\n'.join(names)+'\n').encode
 e['lib/modules/modules.load.recovery']=e['lib/modules/modules.load']
 data=(base/'vendor_0_platform.cpio').read_bytes()+(base/'init_ramdisk.cpio').read_bytes()+write(e)
 blob=subprocess.check_output(['lz4','-l','-c'],input=data)
-out=base/'virtio_gpu_signed_transport_initrd.img';assert not out.exists();out.write_bytes(blob)
+out=base/'virtio_gpu_signed_transport_initrd.img';out.write_bytes(blob)
 (base/'virtio_gpu_signed_transport_manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
 print(out,len(blob),hashlib.sha256(blob).hexdigest())

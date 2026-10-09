@@ -42,6 +42,46 @@ handle() {
     VM_STATUS)
       echo "VM_CONTROL boot=$(getprop sys.boot_completed) user=$(timeout 5 am get-current-user) size=$(timeout 5 wm size | tr '\n' ' ') density=$(timeout 5 wm density | tr '\n' ' ')"
       timeout 5 cat /proc/asound/cards 2>&1 | sed 's/^/VM_CONTROL asound /' ;;
+    VM_BATTERY\ *)
+      args="${line#VM_BATTERY }"
+      level="${args%% *}"
+      state="${args#* }"
+      [ "$state" = "$args" ] && state="discharging"
+      if [ -n "$level" ]; then
+        # Ensure battery is recognized as present so the unknown question-mark icon is replaced with the battery gauge
+        cmd battery set present 1
+        # Set level first so Android never evaluates 0% battery while offline
+        cmd battery set level "$level"
+        if [ "$state" = "charging" ] || [ "$state" = "ac" ]; then
+          cmd battery set ac 1
+          cmd battery set usb 0
+          cmd battery set status 2
+        elif [ "$state" = "full" ]; then
+          cmd battery set ac 1
+          cmd battery set usb 0
+          cmd battery set status 5
+        else
+          cmd battery set ac 0
+          cmd battery set usb 0
+          cmd battery set wireless 0
+          cmd battery set status 3
+        fi
+        settings put system status_bar_show_battery_percent 1 2>/dev/null
+        settings --user 0 put system status_bar_show_battery_percent 1 2>/dev/null
+        u=$(timeout 3 am get-current-user 2>/dev/null)
+        [ -n "$u" ] && settings --user "$u" put system status_bar_show_battery_percent 1 2>/dev/null
+        echo "VM_CONTROL battery level=$level state=$state"
+      fi ;;
+    VM_BATTERY_PERCENT\ [01])
+      val="${line#VM_BATTERY_PERCENT }"
+      settings put system status_bar_show_battery_percent "$val" 2>/dev/null
+      settings --user 0 put system status_bar_show_battery_percent "$val" 2>/dev/null
+      u=$(timeout 3 am get-current-user 2>/dev/null)
+      [ -n "$u" ] && settings --user "$u" put system status_bar_show_battery_percent "$val" 2>/dev/null
+      echo "VM_CONTROL battery_percent=$val" ;;
+    VM_BATTERY_RESET)
+      cmd battery reset
+      echo "VM_CONTROL battery_reset" ;;
   esac
 }
 # Commands must not read the console, or they would swallow later verbs.
