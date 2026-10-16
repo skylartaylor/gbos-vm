@@ -2,7 +2,7 @@
 """Read the partition table and Android v4 boot images out of the recovery image (read-only)."""
 import gzip, hashlib, json, pathlib, struct, subprocess, zlib
 R=pathlib.Path(__file__).resolve().parents[1]
-out=R/'artifacts/mica/normal';out.mkdir()
+out=R/'artifacts/mica/normal';out.mkdir(parents=True,exist_ok=True)
 u=lambda b,o:struct.unpack_from('<I',b,o)[0]
 align=lambda n,p:(n+p-1)//p*p
 manifest={}
@@ -24,6 +24,22 @@ with (R/'artifacts/mica-recovery.raw').open('rb') as f:
     blobs={}
     for n in ['boot_a','init_boot_a','vendor_boot_a','vbmeta_a','pvmfw_a','recovery_a']:
         s,t=parts[n];f.seek(s);b=f.read(t-s);assert len(b)==t-s;save(n+'.bin',b);blobs[n]=b
+    vb=blobs['vbmeta_a'];magic,maj,min_,auth_size,aux_size=struct.unpack_from('>4sIIQQ',vb,0)
+    vb_size=256+auth_size+aux_size if magic==b'AVB0' else 7680
+    vb_digest=hashlib.sha256(vb[:vb_size]).hexdigest()
+    super_base=parts['super'][0];f.seek(super_base+12288);hdr=f.read(256);lp_parts={}
+    if hdr[:4]==b'\x30\x50\x4c\x41':
+        hdr_size=u(hdr,8);part_offset,part_num,part_entry_size=struct.unpack_from('<III',hdr,80)
+        extents_offset,extents_num,extents_entry_size=struct.unpack_from('<III',hdr,92)
+        tables_start=super_base+12288+hdr_size;f.seek(tables_start+extents_offset);extents=[]
+        for _ in range(extents_num):num_sec,ttype,tdata,tsrc=struct.unpack('<QIQI',f.read(extents_entry_size));extents.append((num_sec,ttype,tdata,tsrc))
+        f.seek(tables_start+part_offset)
+        for _ in range(part_num):
+            pdata=f.read(part_entry_size);name=pdata[:36].rstrip(b'\0').decode()
+            attr,first_ext,num_ext,group=struct.unpack_from('<IIII',pdata,36)
+            if num_ext>0:e=extents[first_ext];lp_parts[name]={'size':e[0]*512,'offset':super_base+e[2]*512}
+    img_info={'vbmeta_size':vb_size,'vbmeta_digest':vb_digest,'vendor_offset':lp_parts.get('vendor_a',{}).get('offset',5647630336),'vendor_size':lp_parts.get('vendor_a',{}).get('size',392548352),'system_dlkm_offset':lp_parts.get('system_dlkm_a',{}).get('offset',8257536000),'system_dlkm_size':lp_parts.get('system_dlkm_a',{}).get('size',8482816)}
+    (R/'artifacts/mica/image_info.json').write_text(json.dumps(img_info,indent=2)+'\n')
 boot,init,v=[blobs[n] for n in ['boot_a','init_boot_a','vendor_boot_a']]
 assert boot[:8]==init[:8]==b'ANDROID!' and u(boot,40)==u(init,40)==4
 kernel=boot[4096:4096+u(boot,8)];save('kernel.payload',kernel)

@@ -9,8 +9,8 @@ find_android
   || die "Android build tools are missing. Run ./prereqs.sh to see what, and to install it."
 [ "$(basename "$ANDROID_NDK")" = "$NDK_TESTED" ] || echo "note: NDK $NDK_TESTED not installed; using $(basename "$ANDROID_NDK")"
 NDK_BIN="$ANDROID_NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin"
-[ -x "$WORK/env/bin/meson" ] || die "run build-host.sh first (it creates the meson environment)"
-export PATH="$WORK/env/bin:$PATH" CCACHE_DISABLE=1
+ensure_build_env
+export CCACHE_DISABLE=1
 mkdir -p "$WORK/src" "$WORK/build" "$WORK/guest/mesa-runtime" "$WORK/tools" "$WORK/android-pkgconfig"
 
 say "bison 3 (macOS ships 2.3, which cannot process Mesa's grammars)"
@@ -58,10 +58,13 @@ COMMON=(--cross-file "$WORK/android-aarch64.cross" --buildtype=release -Dforce_f
   -Dgallium-va=disabled -Dzstd=disabled)
 
 say "Mesa VirGL GLES libraries (unpatched source)"
-[ -f "$WORK/build/mesa-gles/build.ninja" ] || meson setup "$WORK/build/mesa-gles" "$MESA_SRC" "${COMMON[@]}" \
-  -Dgallium-drivers=virgl -Dvulkan-drivers= -Degl=enabled -Dgles1=enabled -Dgles2=enabled -Dopengl=true \
-  -Degl-lib-suffix=_virgl -Dgles-lib-suffix=_virgl >"$WORK/build/mesa-gles.configure.log" 2>&1
-ninja -j "$JOBS" -C "$WORK/build/mesa-gles" >"$WORK/build/mesa-gles.build.log" 2>&1 || { tail -20 "$WORK/build/mesa-gles.build.log"; die "Mesa GLES build failed"; }
+if [ ! -f "$WORK/build/mesa-gles/build.ninja" ]; then
+  run_logged "$WORK/build/mesa-gles.configure.log" "Mesa GLES Meson setup" meson setup \
+    "$WORK/build/mesa-gles" "$MESA_SRC" "${COMMON[@]}" \
+    -Dgallium-drivers=virgl -Dvulkan-drivers= -Degl=enabled -Dgles1=enabled -Dgles2=enabled -Dopengl=true \
+    -Degl-lib-suffix=_virgl -Dgles-lib-suffix=_virgl
+fi
+run_logged "$WORK/build/mesa-gles.build.log" "Mesa GLES build" ninja -j "$JOBS" -C "$WORK/build/mesa-gles"
 for pair in src/egl/libEGL_virgl.so src/mesa/glapi/es1api/libGLESv1_CM_virgl.so src/mesa/glapi/es2api/libGLESv2_virgl.so \
             src/gallium/targets/dri/libgallium_dri.so subprojects/libdrm-2.4.133/libdrm.so; do
   "$NDK_BIN/llvm-strip" --strip-unneeded -o "$WORK/guest/mesa-runtime/$(basename "$pair")" "$WORK/build/mesa-gles/$pair"
@@ -78,11 +81,14 @@ if [ "$(cat "$VENUS_SRC/.gbos-patch" 2>/dev/null)" != "$PATCH_ID" ]; then
   patch -s -p1 -d "$VENUS_SRC" < "$ROOT/patches/mesa-android-mapper5.patch"
   echo "$PATCH_ID" > "$VENUS_SRC/.gbos-patch"
 fi
-[ -f "$WORK/build/mesa-venus/build.ninja" ] || meson setup "$WORK/build/mesa-venus" "$VENUS_SRC" "${COMMON[@]}" \
-  --wrap-mode=nodownload -Dgallium-drivers= -Dvulkan-drivers=virtio -Degl=disabled -Dgles1=disabled \
-  -Dgles2=disabled -Dopengl=false >"$WORK/build/mesa-venus.configure.log" 2>&1
-ninja -j "$JOBS" -C "$WORK/build/mesa-venus" src/virtio/vulkan/libvulkan_virtio.so >"$WORK/build/mesa-venus.build.log" 2>&1 \
-  || { tail -20 "$WORK/build/mesa-venus.build.log"; die "Mesa Venus build failed"; }
+if [ ! -f "$WORK/build/mesa-venus/build.ninja" ]; then
+  run_logged "$WORK/build/mesa-venus.configure.log" "Mesa Venus Meson setup" meson setup \
+    "$WORK/build/mesa-venus" "$VENUS_SRC" "${COMMON[@]}" \
+    --wrap-mode=nodownload -Dgallium-drivers= -Dvulkan-drivers=virtio -Degl=disabled -Dgles1=disabled \
+    -Dgles2=disabled -Dopengl=false
+fi
+run_logged "$WORK/build/mesa-venus.build.log" "Mesa Venus build" ninja -j "$JOBS" -C "$WORK/build/mesa-venus" \
+  src/virtio/vulkan/libvulkan_virtio.so
 cp "$WORK/build/mesa-venus/src/virtio/vulkan/libvulkan_virtio.so" "$WORK/guest/libvulkan_virtio.so"
 
 say "Pointer and clipboard helper"

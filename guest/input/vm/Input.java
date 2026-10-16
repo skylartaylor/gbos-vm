@@ -1,13 +1,16 @@
 // Guest input helper for the Googlebook VM, run with app_process as
 // the shell user. It connects out to the viewer on the host (10.0.2.2 is the
-// host loopback under QEMU user networking) and, on its request, injects
+// host loopback under QEMU user networking, 10.0.2.100 in isolated mode) and, on its request, injects
 // absolute mouse events and syncs clipboard text. Same approach as scrcpy's
 // server (InputManager injection as shell), with a small line protocol:
 //   host -> guest:  G width height | M x y | D button | U button | S hscroll vscroll | X | K keycode | C base64-text
 //   guest -> host:  c base64-text (guest clipboard changed) | m tablet|inject (pointer mode)
-// The first line from the host must be "A <token>", matching the random per-boot token the
-// launcher put on the kernel command line (ro.boot.gbos_token). Until then nothing is accepted,
-// so another program on the Mac that grabs the port first cannot drive the guest.
+// Both ends prove the per boot token with an HMAC exchange; the token is never sent. It arrives
+// over the serial console and vm-host-control writes it to TOKEN_FILE, readable only by shell:
+//   host -> guest:  N host-nonce
+//   guest -> host:  a guest-nonce HMAC-SHA256(token, "gbos-guest:" host-nonce ":" guest-nonce)
+//   host -> guest:  A HMAC-SHA256(token, "gbos-host:" guest-nonce ":" host-nonce)
+// Nothing else is sent or accepted until it succeeds.
 // Pointer mode "tablet": a uinput drawing-tablet device (absolute stylus on a
 // non-direct device), which makes Android draw its own cursor at the exact
 // position. If that cannot be created, events are injected instead and the
@@ -23,11 +26,16 @@ import android.view.InputEvent;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import java.io.BufferedReader;
+import java.io.FileReader;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 public final class Input {
     private static final String SHELL = "com.android.shell";
@@ -39,8 +47,10 @@ public final class Input {
     private static float x, y;
     private static volatile String lastClip = "";
     private static volatile OutputStream out;
-    private static String token = "";
+    private static final String TOKEN_FILE = "/data/local/tmp/vm-input.token";
+    private static String token = "", host = "10.0.2.2";
     private static boolean authed;
+    private static final SecureRandom random = new SecureRandom();
     private static Process uinput;
     private static OutputStream tablet;
     private static int tabletW, tabletH;
@@ -58,25 +68,42 @@ public final class Input {
             IBinder b = (IBinder) Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "clipboard");
             clipboard = Class.forName("android.content.IClipboard$Stub").getMethod("asInterface", IBinder.class).invoke(null, b);
         } catch (Throwable t) { System.out.println("VM_INPUT clipboard unavailable: " + t); }
-        try { token = (String) Class.forName("android.os.SystemProperties").getMethod("get", String.class).invoke(null, "ro.boot.gbos_token"); }
-        catch (Throwable t) { token = ""; }
-        System.out.println("VM_INPUT ready" + (token.isEmpty() ? " (no token set: accepting any host)" : ""));
+        System.out.println("VM_INPUT ready");
         Thread poll = new Thread(Input::pollClipboard, "clip");
         poll.setDaemon(true);
         poll.start();
+        boolean waiting = false;
         while (true) {
+            // No token, no connection.
+            if (!loadToken()) {
+                if (!waiting) System.out.println("VM_INPUT waiting for the host's token");
+                waiting = true;
+                SystemClock.sleep(2000);
+                continue;
+            }
+            waiting = false;
             try (Socket s = new Socket()) {
-                s.connect(new InetSocketAddress("10.0.2.2", port), 2000);
+                s.connect(new InetSocketAddress(host, port), 2000);
                 s.setTcpNoDelay(true);
-                authed = token.isEmpty();
+                authed = false;
                 OutputStream link = s.getOutputStream();
-                if (authed) out = link;
                 System.out.println("VM_INPUT connected");
                 BufferedReader r = new BufferedReader(new InputStreamReader(s.getInputStream(), "UTF-8"));
-                String line;
-                while ((line = r.readLine()) != null) {
+                String line, guestNonce = null, expected = null;
+                while ((line = readLine(r, authed ? 1 << 20 : 256)) != null) {
                     if (!authed) {
-                        if (!line.equals("A " + token)) { System.out.println("VM_INPUT rejected host: bad token"); break; }
+                        if (guestNonce == null && line.matches("N [0-9a-f]{32}")) {
+                            String hostNonce = line.substring(2);
+                            guestNonce = nonce();
+                            expected = "A " + hmac("gbos-host:" + guestNonce + ":" + hostNonce);
+                            link.write(("a " + guestNonce + " " + hmac("gbos-guest:" + hostNonce + ":" + guestNonce) + "\n").getBytes("UTF-8"));
+                            link.flush();
+                            continue;
+                        }
+                        if (expected == null || !MessageDigest.isEqual(line.getBytes("UTF-8"), expected.getBytes("UTF-8"))) {
+                            System.out.println("VM_INPUT rejected host: bad token");
+                            break;
+                        }
                         authed = true; out = link;
                         continue;
                     }
@@ -93,6 +120,46 @@ public final class Input {
             releaseAll();
             SystemClock.sleep(2000);
         }
+    }
+
+    /** One line, or null at end of stream or when a line exceeds max. */
+    private static String readLine(BufferedReader r, int max) throws java.io.IOException {
+        StringBuilder sb = new StringBuilder();
+        int c;
+        while ((c = r.read()) >= 0) {
+            if (c == '\n') return sb.toString();
+            if (sb.length() >= max) return null;
+            sb.append((char) c);
+        }
+        return null;
+    }
+
+    private static boolean loadToken() {
+        try (BufferedReader f = new BufferedReader(new FileReader(TOKEN_FILE))) {
+            String t = f.readLine(), h = f.readLine();
+            if (t == null || !t.matches("[0-9a-f]{32}")) return false;
+            token = t;
+            host = "10.0.2.100".equals(h) ? h : "10.0.2.2";
+            return true;
+        } catch (Exception e) { return false; }
+    }
+
+    private static String nonce() {
+        byte[] b = new byte[16];
+        random.nextBytes(b);
+        return hex(b);
+    }
+
+    private static String hmac(String msg) throws Exception {
+        Mac m = Mac.getInstance("HmacSHA256");
+        m.init(new SecretKeySpec(token.getBytes("UTF-8"), "HmacSHA256"));
+        return hex(m.doFinal(msg.getBytes("UTF-8")));
+    }
+
+    private static String hex(byte[] b) {
+        StringBuilder sb = new StringBuilder(b.length * 2);
+        for (byte v : b) sb.append(Character.forDigit((v >> 4) & 15, 16)).append(Character.forDigit(v & 15, 16));
+        return sb.toString();
     }
 
     private static void handle(String line) throws Exception {

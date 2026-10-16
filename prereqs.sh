@@ -16,6 +16,7 @@ ok()   { printf '  ok       %s\n' "$*"; }
 miss() { printf '  MISSING  %s\n' "$1"; missing+=("$2"); }
 
 survey() {
+  local build_python
   missing=(); manual=()
   say "Checking prerequisites"
   if [ "$(uname -m)" = arm64 ]; then ok "Apple Silicon Mac"; else printf '  MISSING  Apple Silicon Mac (this is %s)\n' "$(uname -m)"; manual+=("This only runs on Apple Silicon Macs."); fi
@@ -28,6 +29,8 @@ survey() {
       if brew list --formula "$f" >/dev/null 2>&1; then ok "$f"; else miss "$f (Homebrew)" "brew:$f"; fi
     done
   fi
+  if build_python="$(find_build_python)"; then ok "Python build runtime ($(python_version "$build_python"))"
+  else miss "Python 3.10 or newer" "brew:python"; fi
   find_android
   if [ -n "$JAVA_HOME" ]; then ok "JDK ($JAVA_HOME)"; else miss "a JDK" "brew:openjdk"; fi
   if [ -n "$ANDROID_NDK" ]; then ok "Android NDK ($(basename "$ANDROID_NDK"))"; else miss "Android NDK (under $ANDROID_SDK/ndk)" "sdk:ndk;$NDK_TESTED"; fi

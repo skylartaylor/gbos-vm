@@ -1,4 +1,6 @@
 #!/system/bin/sh
+# Don't read the host control console.
+exec </dev/null
 # Startup diagnostics: runs the Vulkan self-test even if boot never completes.
 sleep 35
 echo VM_VULKAN_STARTUP_BEGIN

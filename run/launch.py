@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Start the Googlebook desktop with its viewer window.  launch.py WORK [--fullscreen] [--display WxH]
 Closing the viewer shuts Android down cleanly. Data in WORK/image/googlebook.raw persists."""
-import datetime, json, os, signal, subprocess, sys, time
+import datetime, json, os, re, signal, subprocess, sys, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import battery_sync
 import vm_control
 
 
@@ -45,9 +46,11 @@ def main():
     fullscreen = '--fullscreen' in sys.argv or setting('StartFullscreen', '0') == '1'
     options = ['--memory', setting('MemoryMiB', '4096'), '--cpus', setting('CPUs', '6')]
     if setting('Networking', '1') == '0': options.append('--offline')
+    elif setting('IsolateNetwork', '0') == '1': options.append('--isolated')
     if setting('Audio', '1') == '0': options.append('--no-audio')
     if setting('Bluetooth', '1') == '0': options.append('--no-bluetooth')
-    density = round(240 * width / 1920)
+    # Scale by the tighter dimension against 1920x1200 at 240 dpi.
+    density = round(240 * min(width / 1920, height / 1200))
     name = 'desktop-' + datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
     run_dir = work / 'logs' / name
     children = []
@@ -69,16 +72,23 @@ def main():
                                       env=venv, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
             children.append(viewer)
             serial = run_dir / 'serial.log'; configured = False; start = time.monotonic()
+            battery_stop = None
             while vm.poll() is None and viewer.poll() is None:
                 time.sleep(.5)
-                # Once Android is up, match the display density to the resolution (persists).
-                if not configured and time.monotonic() - start > 20 and serial.exists() and b'VM_BOOT_COMPLETED' in serial.read_bytes():
+                # Once Android is up, match the display density to the resolution (persists) and sync battery.
+                if not configured and time.monotonic() - start > 20 and serial.exists() and re.search(rb'(?m)^VM_BOOT_COMPLETED', serial.read_bytes()):
                     configured = True
-                    try: time.sleep(8); vm_control.send(run_dir, f'VM_DENSITY {density}')
-                    except OSError: pass
+                    try:
+                        time.sleep(8)
+                        vm_control.send(run_dir, f'VM_DENSITY {density}')
+                        battery_stop, _ = battery_sync.start_background_sync(run_dir, interval=30)
+                    except OSError:
+                        pass
     except KeyboardInterrupt:
         print('\nStopping.', flush=True)
     finally:
+        if battery_stop is not None:
+            battery_stop.set()
         for child in reversed(children):
             if child.poll() is None: os.killpg(child.pid, signal.SIGTERM)
         for child in reversed(children):

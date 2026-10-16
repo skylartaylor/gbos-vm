@@ -1,0 +1,5 @@
+meson==1.12.1
+ninja==1.13.2
+mako
+packaging
+pyyaml

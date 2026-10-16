@@ -1,4 +1,6 @@
 #!/system/bin/sh
+# Don't read the host control console.
+exec </dev/null
 # Read-only diagnostic that prints system state to the serial console and exits.
 for pass in 1 2 3 4 5 6 7 8 9 10; do
     sleep 30

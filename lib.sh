@@ -1,10 +1,12 @@
 # Shared settings for the Googlebook-on-Apple-Silicon build scripts. Source, don't run.
 set -Eeuo pipefail
 # Never stop without saying where: any command that ends the script prints its location.
-trap 'rc=$?; [ "$BASH_SUBSHELL" -gt 0 ] || printf "error: %s stopped at line %s (exit %s)\n" "${BASH_SOURCE[0]##*/}" "$LINENO" "$rc" >&2' ERR
+trap 'rc=$?; [ "$BASH_SUBSHELL" -gt 0 ] || { printf "error: %s stopped at line %s (exit %s)\n" "${BASH_SOURCE[0]##*/}" "$LINENO" "$rc" >&2; printf "error: command: %s\n" "$BASH_COMMAND" >&2; }' ERR
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 WORK="${GOOGLEBOOK_WORK:-$ROOT/work}"
-# UTM 5.0.6 beta app bundle: supplies QEMU and the epoxy, Vulkan, MoltenVK and ANGLE frameworks.
+BUILD_REQUIREMENTS="${GBOS_BUILD_REQUIREMENTS:-$ROOT/host/requirements-build.txt}"
+[ -f "$BUILD_REQUIREMENTS" ] || BUILD_REQUIREMENTS="$ROOT/requirements-build.txt"
+# UTM 5.0.7 beta app bundle: supplies QEMU and the epoxy, Vulkan, MoltenVK and ANGLE frameworks.
 UTM_BETA_APP="${UTM_BETA_APP:-$WORK/UTM-beta/UTM.app}"
 # Mesa source tree: supplies Khronos headers for the host build and is the guest driver source.
 MESA_SRC="${MESA_SRC:-$WORK/src/mesa-26.2.4}"
@@ -16,6 +18,76 @@ EPOXY_COMMIT="bf98587477fe68d07b93319ece7b40a7d0e2eabe"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
 # Parallel build jobs. Kept low on purpose: an uncapped Mesa build needs far more RAM.
 JOBS="${GBOS_JOBS:-4}"
+find_build_python() {
+  local candidate minor
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
+    command -v python3
+    return 0
+  fi
+  for minor in 20 19 18 17 16 15 14 13 12 11 10; do
+    candidate="python3.$minor"
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+python_version() { "$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])'; }
+run_logged() { # logfile label command...
+  local logfile="$1" label="$2" rc
+  shift 2
+  if "$@" >"$logfile" 2>&1; then return 0; else rc=$?; fi
+  printf 'error: %s failed (exit %s); last output:\n' "$label" "$rc" >&2
+  tail -40 "$logfile" >&2 || true
+  die "$label failed; full log: $logfile"
+}
+ensure_build_env() {
+  local interpreter version existing_version
+  if [ "${GBOS_BUILD_ENV_READY:-}" = 1 ] && [ -x "${BUILD_ENV_DIR:-}/bin/python" ]; then
+    case ":$PATH:" in *":$BUILD_ENV_DIR/bin:"*) ;; *) export PATH="$BUILD_ENV_DIR/bin:$PATH" ;; esac
+    return 0
+  fi
+
+  interpreter="$(find_build_python)" || die "Python 3.10 or newer is required; install it with 'brew install python'"
+  version="$(python_version "$interpreter")"
+  if [ -x "$WORK/env/bin/python" ] && "$WORK/env/bin/python" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
+    BUILD_ENV_DIR="$WORK/env"
+    existing_version="$(python_version "$BUILD_ENV_DIR/bin/python")"
+    say "Python build environment (existing Python $existing_version)"
+  else
+    BUILD_ENV_DIR="$WORK/env-py$version"
+    say "Python build environment (Python $version)"
+  fi
+
+  mkdir -p "$WORK/build"
+  if [ ! -x "$BUILD_ENV_DIR/bin/python" ]; then
+    "$interpreter" -m venv "$BUILD_ENV_DIR" || die "could not create Python environment at $BUILD_ENV_DIR"
+  fi
+  if ! "$BUILD_ENV_DIR/bin/python" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; then
+    die "$BUILD_ENV_DIR exists but does not contain a working Python 3.10+ environment; move it aside and retry"
+  fi
+  if ! "$BUILD_ENV_DIR/bin/python" -m pip --version >/dev/null 2>&1; then
+    "$BUILD_ENV_DIR/bin/python" -m ensurepip --upgrade || die "could not initialize pip in $BUILD_ENV_DIR"
+  fi
+  local req_hash pip_flags=()
+  req_hash="$(shasum -a 256 "$BUILD_REQUIREMENTS" | cut -d' ' -f1)"
+  if grep -q -- '--hash=' "$BUILD_REQUIREMENTS"; then
+    pip_flags+=(--require-hashes)
+  fi
+  if [ ! -f "$BUILD_ENV_DIR/.requirements-sha256" ] || [ "$(cat "$BUILD_ENV_DIR/.requirements-sha256" 2>/dev/null || true)" != "$req_hash" ]; then
+    run_logged "$WORK/build/python-requirements.log" "Python build requirements installation" \
+      "$BUILD_ENV_DIR/bin/python" -m pip install --disable-pip-version-check "${pip_flags[@]}" -r "$BUILD_REQUIREMENTS"
+    echo "$req_hash" > "$BUILD_ENV_DIR/.requirements-sha256"
+  fi
+  "$BUILD_ENV_DIR/bin/python" -m pip check || die "Python build environment has inconsistent packages"
+  "$BUILD_ENV_DIR/bin/python" -c 'import mako, packaging, yaml'
+  [ "$("$BUILD_ENV_DIR/bin/meson" --version)" = "1.12.1" ] || die "expected Meson 1.12.1 in $BUILD_ENV_DIR"
+  [ "$("$BUILD_ENV_DIR/bin/python" -c 'from importlib.metadata import version; print(version("ninja"))')" = "1.13.2" ] \
+    || die "expected the Ninja 1.13.2 package in $BUILD_ENV_DIR"
+  export BUILD_ENV_DIR GBOS_BUILD_ENV_READY=1
+  case ":$PATH:" in *":$BUILD_ENV_DIR/bin:"*) ;; *) export PATH="$BUILD_ENV_DIR/bin:$PATH" ;; esac
+}
 # Rebuilding replaces signed binaries and the disk image. Doing that under a running VM gets
 # its processes killed by macOS ("Code Signature Invalid") or pulls the disk out from under it.
 no_running_vm() {
@@ -49,25 +121,27 @@ BISON_URL="https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.xz"
 BISON_SHA256="9bba0214ccf7f1079c5d59210045227bcf619519840ebfa80cd3849cff5a5bf2"
 LIBSEPOL_SHA256="79f3d2c88f44b7eb5cf54d9792e03232297e17f97a179163f2750099a00f164d"
 LIBSEPOL_URL="https://github.com/SELinuxProject/selinux/releases/download/3.11/libsepol-3.11.tar.gz"
-# Download a file once and verify it (pass an empty checksum to print it instead).
+# Download once and verify against a pinned checksum.
 fetch() { # url dest sha256
-  if [ ! -f "$2" ]; then mkdir -p "$(dirname "$2")"; curl -fL --retry 3 -o "$2.part" "$1"; mv "$2.part" "$2"; fi
+  [ -n "$3" ] || die "no pinned checksum for $1"
+  if [ ! -f "$2" ]; then mkdir -p "$(dirname "$2")"; curl -fL --proto =https --proto-redir =https --retry 3 -o "$2.part" "$1"; mv "$2.part" "$2"; fi
   local got; got="$(shasum -a 256 "$2" | cut -d' ' -f1)"
-  if [ -z "$3" ]; then echo "sha256 $got  $2"; elif [ "$got" != "$3" ]; then die "checksum mismatch for $2 (got $got)"; fi
+  [ "$got" = "$3" ] || die "checksum mismatch for $2 (got $got)"
 }
-GOOGLEBOOK_URL="https://dl.google.com/device/recovery/mica-user/16471258/recovery.zip"
-GOOGLEBOOK_ZIP_SHA256="cb68dd6dbd73e568cfeecca0cbd4ceb23338640814dc3ee52aba5507e5a645d7"
-GOOGLEBOOK_RAW_SHA256="b0fd614ffe1a088fa3451a4b81c55a73f83e246286184a46ca306250db9af1f1"
+GOOGLEBOOK_URL="https://dl.google.com/device/recovery/quartz-user/16471258/recovery.zip"
+GOOGLEBOOK_ZIP_SHA256="3ba358a46c3c61d1a8b4b34e81c11227d7b45207e90440556fb77b6e021c9363"
+GOOGLEBOOK_RAW_SHA256="9e8674c98796f78b2abe9d5ee0bdd3f31602bd452e3c2799f647849beb53b0c5"
 CUTTLEFISH_BUILD="16373615"
 CUTTLEFISH_ZIP="aosp_cf_arm64_only_phone-img-16373615.zip"
 CUTTLEFISH_SHA256="051caf8072ba9fb417e05999de2984752e44e13ce70b6c49c669f0a73db85c18"
-UTM_DMG_URL="https://github.com/utmapp/UTM/releases/download/v5.0.6/UTM.dmg"
-UTM_DMG_SHA256="6a722486a660e0ab2cf5826bbeaee0f5963999029366709f5a3048d73b1d7cb1"
+UTM_DMG_URL="https://github.com/utmapp/UTM/releases/download/v5.0.7/UTM.dmg"
+UTM_DMG_SHA256="80c2161cae4c1711ae364ed99de8a0e92396287abf85eb583426c7627d039ad9"
 # Large downloads go here; point GOOGLEBOOK_DOWNLOADS at an existing folder to reuse them.
 DOWNLOADS="${GOOGLEBOOK_DOWNLOADS:-$WORK/downloads}"
 # Resumable download of a large file, then checksum verification.
 fetch_big() { # url dest sha256
-  if [ ! -f "$2" ]; then mkdir -p "$(dirname "$2")"; curl -fL --retry 5 -C - -o "$2.part" "$1"; mv "$2.part" "$2"; fi
+  [ -n "$3" ] || die "no pinned checksum for $1"
+  if [ ! -f "$2" ]; then mkdir -p "$(dirname "$2")"; curl -fL --proto =https --proto-redir =https --retry 5 -C - -o "$2.part" "$1"; mv "$2.part" "$2"; fi
   echo "verifying $(basename "$2")"
   [ "$(shasum -a 256 "$2" | cut -d' ' -f1)" = "$3" ] || die "checksum mismatch for $2"
 }

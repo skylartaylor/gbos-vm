@@ -1,10 +1,27 @@
 #!/system/bin/sh
 # Fixed-verb control channel from the host over this VM's private serial
 # console. Runs as shell; anything not listed below is ignored.
+# VM_TOKEN carries a secret: don't echo it.
+stty -echo 2>/dev/null
+# Per boot token for the pointer helper. The host sends it once per boot, so keep it across
+# service restarts and drop a stale one on the first start of a boot (kernel boot id).
+TOKEN_FILE=/data/local/tmp/vm-input.token
+BOOT_MARK=/data/local/tmp/vm-input.bootid
+boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+if [ -z "$boot_id" ] || [ "$(cat "$BOOT_MARK" 2>/dev/null)" != "$boot_id" ]; then
+  rm -f "$TOKEN_FILE"
+  echo "$boot_id" >"$BOOT_MARK" 2>/dev/null || true
+fi
 echo VM_CONTROL_READY
 handle() {
   case "$line" in
     VM_POWEROFF) echo VM_CONTROL poweroff; setprop sys.powerctl shutdown ;;
+    VM_TOKEN\ *)
+      t=${line#VM_TOKEN }; tok=${t%% *}; addr=${t#* }
+      case "$tok" in *[!0-9a-f]*) return ;; esac
+      [ ${#tok} -eq 32 ] || return
+      case "$addr" in 10.0.2.2|10.0.2.100) ;; *) return ;; esac
+      (umask 077; printf '%s\n%s\n' "$tok" "$addr" >"$TOKEN_FILE.new" && mv -f "$TOKEN_FILE.new" "$TOKEN_FILE") && echo "VM_CONTROL token set" ;;
     VM_PASTE\ *)
       printf %s "${line#VM_PASTE }" | base64 -d 2>/dev/null | while IFS= read -r t || [ -n "$t" ]; do
         [ -n "$t" ] && timeout 20 input text "$t"
@@ -39,11 +56,57 @@ handle() {
       for f in /product/media/audio/ringtones/*.ogg /system/media/audio/ringtones/*.ogg /product/media/audio/alarms/*.ogg /system/media/audio/alarms/*.ogg; do [ -f "$f" ] && break; done
       echo "VM_CONTROL play $f"
       timeout 10 am start --user "$u" -a android.intent.action.VIEW -t audio/ogg -d "file://$f" 2>&1 | head -6 | sed 's/^/VM_CONTROL play /' ;;
+    VM_CAMERA_DIAG)
+      # The webcam from the viewer (host/webcam.m) and what the camera stack made of it.
+      ls -lZ /dev/video* /dev/media* 2>&1 | sed 's/^/VM_CONTROL cam dev /'
+      for d in /sys/class/video4linux/*; do echo "VM_CONTROL cam v4l $d $(cat $d/name 2>/dev/null)"; done
+      ps -A -o PID,NAME 2>/dev/null | grep -i -E 'camera|provider' | sed 's/^/VM_CONTROL cam ps /'
+      timeout 8 dumpsys media.camera 2>&1 | grep -i -E 'Number of camera|Camera ID|provider|Facing|device@|Device [0-9]|status|error' | head -30 | cut -c1-160 | sed 's/^/VM_CONTROL cam svc /' ;;
     VM_STATUS)
       echo "VM_CONTROL boot=$(getprop sys.boot_completed) user=$(timeout 5 am get-current-user) size=$(timeout 5 wm size | tr '\n' ' ') density=$(timeout 5 wm density | tr '\n' ' ')"
       timeout 5 cat /proc/asound/cards 2>&1 | sed 's/^/VM_CONTROL asound /'
       echo "VM_CONTROL bluetooth feature=$(timeout 5 pm list features 2>/dev/null | grep -c 'hardware.bluetooth$') on=$(timeout 5 settings get global bluetooth_on) hal=$(getprop init.svc.vendor.bluetooth-aidl-qti) gscd=$(getprop init.svc.android.system.desktop.security.gscd)"
       timeout 6 dumpsys bluetooth_manager 2>/dev/null | grep -m4 -i -E '^ *(enabled|state|address|name):' | cut -c1-80 | sed 's/^/VM_CONTROL btmgr /' ;;
+    VM_BATTERY\ *)
+      args="${line#VM_BATTERY }"
+      level="${args%% *}"
+      state="${args#* }"
+      [ "$state" = "$args" ] && state="discharging"
+      if [ -n "$level" ]; then
+        # Ensure battery is recognized as present so the unknown question-mark icon is replaced with the battery gauge
+        cmd battery set present 1
+        # Set level first so Android never evaluates 0% battery while offline
+        cmd battery set level "$level"
+        if [ "$state" = "charging" ] || [ "$state" = "ac" ]; then
+          cmd battery set ac 1
+          cmd battery set usb 0
+          cmd battery set status 2
+        elif [ "$state" = "full" ]; then
+          cmd battery set ac 1
+          cmd battery set usb 0
+          cmd battery set status 5
+        else
+          cmd battery set ac 0
+          cmd battery set usb 0
+          cmd battery set wireless 0
+          cmd battery set status 3
+        fi
+        settings put system status_bar_show_battery_percent 1 2>/dev/null
+        settings --user 0 put system status_bar_show_battery_percent 1 2>/dev/null
+        u=$(timeout 3 am get-current-user 2>/dev/null)
+        [ -n "$u" ] && settings --user "$u" put system status_bar_show_battery_percent 1 2>/dev/null
+        echo "VM_CONTROL battery level=$level state=$state"
+      fi ;;
+    VM_BATTERY_PERCENT\ [01])
+      val="${line#VM_BATTERY_PERCENT }"
+      settings put system status_bar_show_battery_percent "$val" 2>/dev/null
+      settings --user 0 put system status_bar_show_battery_percent "$val" 2>/dev/null
+      u=$(timeout 3 am get-current-user 2>/dev/null)
+      [ -n "$u" ] && settings --user "$u" put system status_bar_show_battery_percent "$val" 2>/dev/null
+      echo "VM_CONTROL battery_percent=$val" ;;
+    VM_BATTERY_RESET)
+      cmd battery reset
+      echo "VM_CONTROL battery_reset" ;;
   esac
 }
 # Commands must not read the console, or they would swallow later verbs.

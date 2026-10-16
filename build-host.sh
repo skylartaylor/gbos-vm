@@ -15,20 +15,19 @@ if [ ! -d "$MESA_SRC/include/KHR" ]; then
 fi
 mkdir -p "$WORK/src" "$WORK/build" "$WORK/host" "$WORK/pkgconfig"
 
-say "Python build environment (meson, ninja)"
-if [ ! -x "$WORK/env/bin/meson" ]; then
-  python3 -m venv "$WORK/env"
-  "$WORK/env/bin/pip" -q install meson==1.12.1 ninja==1.13.2 mako pyyaml packaging
-fi
-export PATH="$WORK/env/bin:$PATH" CCACHE_DISABLE=1
+ensure_build_env
+export CCACHE_DISABLE=1
 
 say "libepoxy headers matching UTM's bundled epoxy"
 # Only the generated headers are needed; the library itself comes from the UTM frameworks.
 checkout "$EPOXY_REPO" "$EPOXY_COMMIT" "$WORK/src/libepoxy"
-[ -f "$WORK/build/libepoxy/build.ninja" ] || meson setup "$WORK/build/libepoxy" "$WORK/src/libepoxy" \
-  -Dtests=false -Dglx=no -Degl=yes -Dx11=false >/dev/null
-ninja -j "$JOBS" -C "$WORK/build/libepoxy" include/epoxy/gl_generated.h include/epoxy/egl_generated.h \
-  include/epoxy/gl_angle_ext_generated.h include/epoxy/egl_angle_ext_generated.h >/dev/null
+if [ ! -f "$WORK/build/libepoxy/build.ninja" ]; then
+  run_logged "$WORK/build/libepoxy.configure.log" "libepoxy Meson setup" meson setup \
+    "$WORK/build/libepoxy" "$WORK/src/libepoxy" -Dtests=false -Dglx=no -Degl=yes -Dx11=false
+fi
+run_logged "$WORK/build/libepoxy.build.log" "libepoxy build" ninja -j "$JOBS" -C "$WORK/build/libepoxy" \
+  include/epoxy/gl_generated.h include/epoxy/egl_generated.h \
+  include/epoxy/gl_angle_ext_generated.h include/epoxy/egl_angle_ext_generated.h
 
 cat > "$WORK/pkgconfig/epoxy.pc" <<PC
 Name: epoxy
@@ -49,11 +48,13 @@ PC
 say "virglrenderer (UTM fork) with the Android interop patch"
 checkout "$VIRGL_REPO" "$VIRGL_COMMIT" "$WORK/src/virglrenderer"
 apply_patch "$WORK/src/virglrenderer" "$ROOT/patches/virglrenderer-android-interop.patch"
-[ -f "$WORK/build/virglrenderer/build.ninja" ] || PKG_CONFIG_PATH="$WORK/pkgconfig" meson setup \
-  "$WORK/build/virglrenderer" "$WORK/src/virglrenderer" --buildtype=release \
-  -Dvenus=true -Dneptune=true -Dvulkan-dload=false -Dplatforms=egl -Dtests=false -Dvtest=false \
-  -Dcheck-gl-errors=false --prefix="$WORK/sysroot" >/dev/null
-ninja -j "$JOBS" -C "$WORK/build/virglrenderer" >/dev/null
+if [ ! -f "$WORK/build/virglrenderer/build.ninja" ]; then
+  run_logged "$WORK/build/virglrenderer.configure.log" "virglrenderer Meson setup" env PKG_CONFIG_PATH="$WORK/pkgconfig" meson setup \
+    "$WORK/build/virglrenderer" "$WORK/src/virglrenderer" --buildtype=release \
+    -Dvenus=true -Dneptune=true -Dvulkan-dload=false -Dplatforms=egl -Dtests=false -Dvtest=false \
+    -Dcheck-gl-errors=false --prefix="$WORK/sysroot"
+fi
+run_logged "$WORK/build/virglrenderer.build.log" "virglrenderer build" ninja -j "$JOBS" -C "$WORK/build/virglrenderer"
 cp "$WORK/build/virglrenderer/src/libvirglrenderer.1.dylib" "$WORK/build/virglrenderer/server/virgl_render_server" "$WORK/host/"
 
 say "QEMU library that loads the patched renderer"
@@ -74,7 +75,7 @@ say "Googlebook VM app"
 checkout "$COCOASPICE_REPO" "$COCOASPICE_COMMIT" "$WORK/src/CocoaSpice"
 apply_patch "$WORK/src/CocoaSpice" "$ROOT/patches/cocoaspice-viewer.patch"
 rm -rf "$WORK/host/Googlebook Viewer.app"
-python3 "$ROOT/host/build_viewer.py" "$WORK/src/CocoaSpice" "$FW" "$ROOT/host/viewer.m" "$WORK/host" "$ROOT/run" "$WORK" >/dev/null
+"$BUILD_ENV_DIR/bin/python" "$ROOT/host/build_viewer.py" "$WORK/src/CocoaSpice" "$FW" "$ROOT/host/viewer.m" "$WORK/host" "$ROOT/run" "$WORK" >/dev/null
 
 say "Host build complete: $WORK/host"
 ls -l "$WORK/host"

@@ -10,9 +10,11 @@ import hashlib,io,json,os,stat,struct,subprocess,sys,tarfile
 from cpio_tools import read,write
 from erofs_metadata import metadata
 from relocate_vendor import relocate
-R=Path(__file__).resolve().parents[1];O=R/'artifacts/mica'/sys.argv[1];assert O.parent==R/'artifacts/mica';O.mkdir()
+R=Path(__file__).resolve().parents[1];O=R/'artifacts/mica'/sys.argv[1];assert O.parent==R/'artifacts/mica';O.mkdir(parents=True,exist_ok=True)
 D=R/'experiments/erofs-utils/1.9.4/bin';E=R/'experiments/ext4-tools/e2fsprogs/1.47.4/sbin/debugfs'
-raw=R/'artifacts/mica-recovery.raw';off=5647630336;partsize=385949696
+raw=R/'artifacts/mica-recovery.raw'
+_info=json.loads((R/'artifacts/mica/image_info.json').read_text()) if (R/'artifacts/mica/image_info.json').exists() else {}
+off=_info.get('vendor_offset',5647630336);partsize=_info.get('vendor_size',392548352)
 payload=R/'artifacts/security-port-review/rust_nonsecure_payload.img'
 # Optional: take rebuilt guest components and the policy tool from publish/build-guest.sh output.
 GUEST=Path(os.environ['GOOGLEBOOK_GUEST_DIR']) if os.environ.get('GOOGLEBOOK_GUEST_DIR') else None
@@ -68,7 +70,7 @@ if '--crash-diagnostics' in sys.argv:
  b,label,mode=files[n]
  start=b.index(b'-v threadtime ')+len(b'-v threadtime ')
  end=b.index(b'"',start)
- b=b[:start]+b'*:S DEBUG:F chromium:V ActivityManager:E AndroidRuntime:E Watchdog:E lmkd:I libc:F am_crash:I am_kill:I am_anr:I'+b[end:]
+ b=b[:start]+b'*:S DEBUG:F chromium:F ActivityManager:E AndroidRuntime:E Watchdog:E lmkd:I libc:F am_crash:I am_kill:I am_anr:I'+b[end:]
  files[n]=(b,label,mode)
  (O/'crash-diagnostics.json').write_text(json.dumps({'purpose':'capture native debuggerd backtraces and Chromium fatal checks','security_policy':'unchanged'})+'\n')
 for n in ['keymint','secureclock','sharedsecret']:
@@ -207,6 +209,9 @@ if '--audio' in sys.argv:
  from mica_audio_port import apply
  apply(add)
  (O/'audio-port.json').write_text(json.dumps({'source':'official Cuttlefish build 16373615 audio APEX','deselected':'com.android.hardware.audio.desktop','host_audio':'none'})+'\n')
+if '--camera' in sys.argv:
+ from mica_camera_port import apply
+ (O/'camera-port.json').write_text(json.dumps(apply(add,original,raw,off))+'\n')
 if '--vm-compat' in sys.argv:
  # Keep A/B boot-control behaviour without the ChromeOS firmware calls.
  add('bin/hw/android.hardware.boot-service.android-desktop',(R/'artifacts/security-port-review/boot-service.default').read_bytes(),'hal_bootctl_default_exec',0o755)
@@ -269,6 +274,7 @@ done
 with tarfile.open(O/'overlay.tar','w',format=tarfile.PAX_FORMAT) as t:
  dirs=['.','bin','bin/hw','etc','etc/init','etc/init/hw','etc/selinux','etc/vintf','etc/vintf/manifest','lib64','lib64/hw','lib64/egl','lib64/vm_keymint']
  if '--audio' in sys.argv:dirs.append('apex')
+ if '--camera' in sys.argv and 'apex' not in dirs:dirs.append('apex')
  dirs+=extra_dirs+new_dirs[1:]
  for n in dirs:
   m=metadata(raw,'/'+n if n!='.' else '/',off) if n not in new_dirs else {'mode':0o40755,'uid':0,'gid':2000,'mtime':1230768000,'xattrs':{'security.selinux':b'u:object_r:vendor_file:s0' if n.startswith('lib64') else b'u:object_r:vendor_configs_file:s0'}}
